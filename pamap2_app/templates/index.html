@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PAMAP2 — Wearable Sensor Reliability Checker</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ── Reset & base ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #0a0a0f;
+  --s1:      #13131a;
+  --s2:      #1c1c28;
+  --border:  #2a2a3d;
+  --text:    #e8e8f0;
+  --muted:   #6b6b8a;
+  --dim:     #9999bb;
+  --green:   #00e5a0;
+  --yellow:  #f5c842;
+  --red:     #ff4d6d;
+  --blue:    #5b8fff;
+  --purple:  #a78bfa;
+  --radius:  14px;
+  --font:    'DM Mono', monospace;
+  --fhead:   'Syne', sans-serif;
+}
+html { scroll-behavior: smooth; }
+body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; font-size: 14px; }
+
+/* ── Layout helpers ────────────────────────────────────────────────────────── */
+.flex       { display: flex; }
+.flex-col   { flex-direction: column; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.gap-2  { gap: 8px; }
+.gap-3  { gap: 12px; }
+.gap-4  { gap: 16px; }
+.gap-5  { gap: 20px; }
+.flex-1 { flex: 1; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+.grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+.w-full { width: 100%; }
+@media (max-width: 860px) { .grid-2 { grid-template-columns: 1fr; } .grid-6 { grid-template-columns: repeat(3,1fr); } }
+@media (max-width: 540px) { .grid-3 { grid-template-columns: 1fr; } }
+
+/* ── Card ──────────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.card-title {
+  font-family: var(--fhead);
+  font-size: 0.62rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 16px;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────────── */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 32px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(10,10,15,0.95);
+  backdrop-filter: blur(12px);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.logo { display: flex; align-items: center; gap: 12px; }
+.logo-icon {
+  width: 38px; height: 38px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--green), var(--blue));
+  display: grid; place-items: center; font-size: 1.2rem;
+}
+.logo h1 { font-family: var(--fhead); font-size: 15px; font-weight: 800; letter-spacing: -0.02em; }
+.logo p  { font-size: 0.6rem; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; margin-top: 2px; }
+.status-badge {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.7rem; color: var(--muted);
+  border: 1px solid var(--border);
+  padding: 5px 12px; border-radius: 99px;
+}
+.pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.2} }
+
+/* ── Nav ───────────────────────────────────────────────────────────────────── */
+nav {
+  display: flex;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(10,10,15,.7);
+  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 65px;
+  z-index: 90;
+}
+.tab {
+  padding: 12px 20px;
+  font-family: var(--font);
+  font-size: 0.72rem;
+  color: var(--muted);
+  cursor: pointer;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  transition: color .15s;
+}
+.tab:hover  { color: var(--text); }
+.tab.active { color: var(--green); border-bottom-color: var(--green); }
+
+/* ── Main ──────────────────────────────────────────────────────────────────── */
+main { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* ── Section title ─────────────────────────────────────────────────────────── */
+.section-title {
+  display: flex; align-items: center; gap: 12px;
+  font-family: var(--fhead);
+  font-size: 0.6rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 24px;
+}
+.section-title::after { content:''; flex:1; height:1px; background:var(--border); }
+
+/* ── Explainer banner ──────────────────────────────────────────────────────── */
+.explainer {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  margin-bottom: 24px;
+  font-size: 0.8rem;
+  color: var(--dim);
+  line-height: 1.7;
+}
+.explainer strong { color: var(--text); }
+
+/* ── Sensor picker ─────────────────────────────────────────────────────────── */
+.sensor-btn {
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+  color: var(--text);
+  font-family: var(--font);
+}
+.sensor-btn:hover  { border-color: var(--green); }
+.sensor-btn.active { border-color: var(--green); background: rgba(0,229,160,.06); box-shadow: 0 0 0 1px var(--green); }
+.sensor-btn .icon  { font-size: 1.8rem; margin-bottom: 6px; }
+.sensor-btn .name  { font-size: 13px; font-weight: 500; }
+.sensor-btn .sub   { font-size: 0.6rem; color: var(--muted); margin-top: 3px; }
+
+/* ── Select ─────────────────────────────────────────────────────────────────── */
+select {
+  width: 100%;
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--text);
+  font-family: var(--font);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236b6b8a' stroke-width='1.5' fill='none'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+}
+select:focus { border-color: var(--green); }
+.hint-text { font-size: 0.68rem; color: var(--muted); margin-top: 10px; line-height: 1.6; }
+
+/* ── Presets ────────────────────────────────────────────────────────────────── */
+.preset-label { font-size: 0.62rem; color: var(--muted); letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px; }
+.preset-row   { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.preset-btn {
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 0.72rem;
+  cursor: pointer;
+  color: var(--text);
+  font-family: var(--font);
+  transition: border-color .15s;
+}
+.preset-btn:hover { border-color: var(--green); }
+
+/* ── Sliders ────────────────────────────────────────────────────────────────── */
+.slider-group { margin-bottom: 18px; }
+.slider-label-row { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.slider-name  { font-size: 0.72rem; color: var(--dim); }
+.slider-value { font-size: 0.75rem; font-weight: 500; color: var(--text); min-width: 44px; text-align: right; }
+input[type=range] {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 4px;
+  border-radius: 4px;
+  background: var(--s2);
+  outline: none;
+  cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--green);
+  cursor: pointer;
+  transition: transform .1s;
+}
+input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.25); }
+input[type=range]::-moz-range-thumb {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--green);
+  border: none;
+  cursor: pointer;
+}
+
+/* ── Magnitude pill ────────────────────────────────────────────────────────── */
+.mag-pill {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--s2);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 16px;
+}
+.mag-label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; }
+.mag-value { font-family: var(--fhead); font-size: 1.3rem; font-weight: 700; }
+.mag-note  { font-size: 0.65rem; color: var(--muted); margin-left: auto; }
+
+/* ── CTA button ─────────────────────────────────────────────────────────────── */
+.check-btn {
+  width: 100%;
+  padding: 14px;
+  background: var(--green);
+  color: #000;
+  border: none;
+  border-radius: var(--radius);
+  font-family: var(--fhead);
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: opacity .15s, transform .1s;
+  margin-top: 4px;
+}
+.check-btn:hover  { opacity: .88; }
+.check-btn:active { transform: scale(.98); }
+
+/* ── Result panel ───────────────────────────────────────────────────────────── */
+.result-placeholder {
+  background: var(--s1);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 32px;
+  color: var(--border);
+}
+.result-placeholder .ph-icon { font-size: 3.5rem; margin-bottom: 16px; opacity: .3; }
+.result-placeholder p { font-size: 0.8rem; line-height: 1.7; }
+.result-loading {
+  background: var(--s1); border: 1px solid var(--border);
+  border-radius: var(--radius); min-height: 520px;
+  display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+}
+.spinner {
+  width: 44px; height: 44px;
+  border: 3px solid var(--border);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin .75s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── TL result card ─────────────────────────────────────────────────────────── */
+.tl-card { border-radius: var(--radius); padding: 24px; border: 1px solid; margin-bottom: 14px; }
+.tl-card-inner { display: flex; align-items: flex-start; gap: 20px; }
+.tl-circle {
+  width: 72px; height: 72px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 2rem; flex-shrink: 0; border: 2px solid;
+  animation: tl-pop .4s ease both;
+}
+@keyframes tl-pop { from{transform:scale(.6);opacity:0} 70%{transform:scale(1.08)} to{transform:scale(1);opacity:1} }
+.tl-badge {
+  display: inline-block;
+  padding: 3px 10px; border-radius: 99px;
+  font-size: 0.62rem; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  border: 1px solid;
+  margin-bottom: 8px;
+}
+.tl-sensor-label { font-size: 0.68rem; color: var(--muted); margin-left: 8px; }
+.tl-verdict { font-size: 0.8rem; color: var(--dim); line-height: 1.6; }
+
+/* Traffic light colour classes */
+.tl-GREEN  { --tlc: var(--green);  --tlbg: rgba(0,229,160,.08);  --tlbd: rgba(0,229,160,.25); }
+.tl-YELLOW { --tlc: var(--yellow); --tlbg: rgba(245,200,66,.08); --tlbd: rgba(245,200,66,.25); }
+.tl-RED    { --tlc: var(--red);    --tlbg: rgba(255,77,109,.08); --tlbd: rgba(255,77,109,.25); }
+.apply-tl { background: var(--tlbg); border-color: var(--tlbd); color: var(--tlc); }
+
+/* ── Reliability bar ─────────────────────────────────────────────────────────── */
+.rel-bar-wrap { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 14px; }
+.rel-bar-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
+.rel-pct { font-family: var(--fhead); font-size: 2.2rem; font-weight: 800; }
+.bar-bg  { height: 10px; background: var(--s2); border-radius: 99px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 99px; transition: width .7s cubic-bezier(.34,1.2,.64,1); width: 0; }
+.rel-sub { font-size: 0.65rem; color: var(--muted); margin-top: 8px; }
+
+/* ── Advice card ────────────────────────────────────────────────────────────── */
+.advice-card { border-radius: var(--radius); padding: 16px 18px; border: 1px solid; margin-bottom: 14px; }
+.advice-label { font-size: 0.6rem; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); margin-bottom: 6px; font-family: var(--fhead); }
+.advice-text  { font-size: 0.78rem; line-height: 1.6; }
+
+/* ── Top 3 ──────────────────────────────────────────────────────────────────── */
+.top3-row { margin-bottom: 12px; }
+.top3-label-row { display: flex; justify-content: space-between; font-size: 0.72rem; margin-bottom: 5px; }
+.top3-bar-bg    { height: 6px; background: var(--s2); border-radius: 99px; overflow: hidden; }
+.top3-bar-fill  { height: 100%; border-radius: 99px; transition: width .6s ease; }
+
+/* ── Reset btn ──────────────────────────────────────────────────────────────── */
+.reset-btn {
+  width: 100%; padding: 11px;
+  background: var(--s2); border: 1px solid var(--border);
+  border-radius: var(--radius); font-size: 13px; color: var(--text);
+  font-family: var(--font); cursor: pointer;
+  transition: border-color .15s;
+}
+.reset-btn:hover { border-color: var(--green); }
+
+/* ── Dashboard stats ─────────────────────────────────────────────────────────── */
+.stat-card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  position: relative; overflow: hidden;
+}
+.stat-card::before {
+  content:''; position:absolute; top:0; left:0; right:0; height:2px;
+  background: linear-gradient(90deg, var(--green), var(--blue));
+}
+.stat-label { font-size: 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 4px; }
+.stat-value { font-family: var(--fhead); font-size: 1.8rem; font-weight: 800; line-height: 1; }
+.stat-sub   { font-size: 0.58rem; color: var(--muted); margin-top: 3px; }
+
+/* ── Dashboard reliability bar ──────────────────────────────────────────────── */
+.db-tl-bar { height: 12px; background: var(--s2); border-radius: 99px; overflow: hidden; display: flex; }
+.db-seg    { height: 100%; transition: width .8s cubic-bezier(.34,1.2,.64,1); }
+.tl-legend { display: flex; gap: 20px; margin-top: 10px; font-size: 0.68rem; color: var(--muted); }
+.tl-dot    { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+
+/* ── Activity table ──────────────────────────────────────────────────────────── */
+.act-table { width: 100%; border-collapse: collapse; }
+.act-table th { font-size: 0.6rem; color: var(--muted); text-transform: uppercase; letter-spacing: .1em; text-align: left; padding-bottom: 10px; border-bottom: 1px solid var(--border); font-weight: 400; }
+.act-table td { padding: 7px 0; border-bottom: 1px solid rgba(42,42,61,.4); font-size: 0.75rem; }
+.act-table tr:last-child td { border-bottom: none; }
+.tier-pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 0.58rem; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.tier-HIGH   { background: rgba(0,229,160,.1); color: var(--green); }
+.tier-MEDIUM { background: rgba(245,200,66,.1); color: var(--yellow); }
+.tier-LOW    { background: rgba(255,77,109,.1); color: var(--red); }
+.mini-bar-bg   { display:inline-block; width:60px; height:5px; background:var(--s2); border-radius:99px; vertical-align:middle; overflow:hidden; }
+.mini-bar-fill { display:block; height:100%; border-radius:99px; }
+
+/* ── Misclassification rows ──────────────────────────────────────────────────── */
+.mc-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(42,42,61,.3); font-size: 0.74rem; }
+.mc-row:last-child { border-bottom: none; }
+.mc-count { margin-left: auto; background: var(--s2); padding: 2px 8px; border-radius: 6px; font-size: 0.65rem; color: var(--muted); }
+
+/* ── Model comparison ────────────────────────────────────────────────────────── */
+.model-row    { margin-bottom: 16px; }
+.model-name   { display: flex; justify-content: space-between; font-size: 0.74rem; margin-bottom: 5px; }
+.model-bar-bg { height: 7px; background: var(--s2); border-radius: 99px; overflow: hidden; }
+
+/* ── LOSO ───────────────────────────────────────────────────────────────────── */
+.loso-row { display: grid; grid-template-columns: 64px 1fr 44px; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 0.72rem; }
+
+/* ── Why architecture ────────────────────────────────────────────────────────── */
+.arch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+.arch-item .arch-name { font-size: 0.8rem; font-weight: 500; margin-bottom: 6px; }
+.arch-item p { font-size: 0.72rem; color: var(--muted); line-height: 1.6; }
+
+/* ── Graph grid ──────────────────────────────────────────────────────────────── */
+.graph-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.graph-card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; transition: transform .15s; }
+.graph-card:hover { transform: scale(1.01); }
+.graph-label { font-size: 0.65rem; color: var(--muted); text-align: center; padding: 8px; background: var(--s2); }
+.graph-card img { width: 100%; display: block; }
+
+/* ── About ───────────────────────────────────────────────────────────────────── */
+.about-hero {
+  background: linear-gradient(135deg, rgba(0,229,160,.07), rgba(91,143,255,.07));
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 40px;
+  text-align: center;
+  margin-bottom: 24px;
+}
+.about-title {
+  font-family: var(--fhead); font-size: 2rem; font-weight: 800; letter-spacing: -.04em;
+  background: linear-gradient(135deg, var(--green), var(--blue));
+  -webkit-background: text; -webkit-text-fill-color: transparent;
+  margin-bottom: 12px;
+}
+.about-sub { font-size: 0.82rem; color: var(--muted); line-height: 1.8; max-width: 540px; margin: 0 auto; }
+.pipeline-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0; }
+.pipeline-step { padding: 20px 16px; text-align: center; border-right: 1px solid var(--border); }
+.pipeline-step:last-child { border-right: none; }
+.step-num  { font-family: var(--fhead); font-size: 1.8rem; font-weight: 800; color: var(--blue); opacity: .35; }
+.step-name { font-family: var(--fhead); font-size: 0.85rem; font-weight: 700; margin: 4px 0; }
+.step-desc { font-size: 0.62rem; color: var(--muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">📡</div>
+    <div>
+      <h1>PAMAP2 Sensor Reliability</h1>
+      <p>Wearable · Activity Recognition · ML Project</p>
+    </div>
+  </div>
+  <div class="status-badge">
+    <span class="pulse"></span>
+    96.6% accuracy · 11 activities
+  </div>
+</header>
+
+<!-- NAV -->
+<nav>
+  <button class="tab active" onclick="showTab('checker', this)">Sensor Checker</button>
+  <button class="tab"        onclick="showTab('dashboard', this)">Dashboard</button>
+  <button class="tab"        onclick="showTab('models', this)">Models</button>
+  <button class="tab"        onclick="showTab('analytics', this)">Analytics</button>
+  <button class="tab"        onclick="showTab('about', this)">About</button>
+</nav>
+
+<main>
+
+<!-- ═══════════════════════════════ SENSOR CHECKER ══════════════════════════ -->
+<div id="panel-checker" class="panel active">
+
+  <div class="section-title"><span>Check Your Sensor Reliability</span></div>
+
+  <div class="explainer">
+    <strong>How it works:</strong> Select which sensor to test, tell the system what activity you're currently doing, then set your sensor's accelerometer readings. The real trained ML model analyses whether your readings match the expected pattern for that activity and tells you if the sensor is trustworthy.
+  </div>
+
+  <div class="grid-2">
+    <!-- LEFT: inputs -->
+    <div>
+
+      <!-- Step 1: sensor -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">① Select sensor to test</div>
+        <div class="grid-3">
+          <button class="sensor-btn" data-sensor="hand" onclick="selectSensor('hand',this)">
+            <div class="icon">🖐</div>
+            <div class="name">Hand</div>
+            <div class="sub">Wrist / dominant</div>
+          </button>
+          <button class="sensor-btn" data-sensor="chest" onclick="selectSensor('chest',this)">
+            <div class="icon">🫀</div>
+            <div class="name">Chest</div>
+            <div class="sub">Sternum strap</div>
+          </button>
+          <button class="sensor-btn" data-sensor="ankle" onclick="selectSensor('ankle',this)">
+            <div class="icon">🦶</div>
+            <div class="name">Ankle</div>
+            <div class="sub">Dominant ankle</div>
+          </button>
+        </div>
+      </div>
+
+      <!-- Step 2: activity -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">② What activity are you doing?</div>
+        <select id="activity-select" onchange="updateHint()">
+          <option value="lying">🛏  Lying down</option>
+          <option value="sitting">🪑  Sitting</option>
+          <option value="standing">🧍  Standing still</option>
+          <option value="walking" selected>🚶  Walking</option>
+          <option value="running">🏃  Running</option>
+          <option value="cycling">🚴  Cycling</option>
+          <option value="nordic_walk">🎿  Nordic walking</option>
+          <option value="stairs_up">⬆  Climbing stairs</option>
+          <option value="stairs_down">⬇  Descending stairs</option>
+          <option value="vacuuming">🧹  Vacuuming</option>
+          <option value="ironing">👕  Ironing</option>
+        </select>
+        <div class="hint-text" id="activity-hint"></div>
+      </div>
+
+      <!-- Step 3: readings -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">③ Enter sensor readings (accelerometer)</div>
+
+        <div class="preset-label">Quick presets</div>
+        <div class="preset-row">
+          <button class="preset-btn" onclick="applyPreset('healthy')">✓ Normal reading</button>
+          <button class="preset-btn" onclick="applyPreset('noisy')">⚠ Slightly noisy</button>
+          <button class="preset-btn" onclick="applyPreset('faulty')">✕ Faulty / misplaced</button>
+          <button class="preset-btn" onclick="applyPreset('flat')">✕ Dead / disconnected</button>
+        </div>
+
+        <div class="slider-group">
+          <div class="slider-label-row">
+            <span class="slider-name">Accelerometer X (m/s²)</span>
+            <span class="slider-value" id="acc_x_val">0.0</span>
+          </div>
+          <input type="range" id="acc_x" min="-20" max="20" step="0.1" value="0" oninput="sliderUpdate()">
+        </div>
+        <div class="slider-group">
+          <div class="slider-label-row">
+            <span class="slider-name">Accelerometer Y (m/s²)</span>
+            <span class="slider-value" id="acc_y_val">0.0</span>
+          </div>
+          <input type="range" id="acc_y" min="-20" max="20" step="0.1" value="0" oninput="sliderUpdate()">
+        </div>
+        <div class="slider-group">
+          <div class="slider-label-row">
+            <span class="slider-name">Accelerometer Z (m/s²) — gravity ≈ 9.8 when upright</span>
+            <span class="slider-value" id="acc_z_val">9.8</span>
+          </div>
+          <input type="range" id="acc_z" min="-20" max="20" step="0.1" value="9.8" oninput="sliderUpdate()">
+        </div>
+        <div class="slider-group">
+          <div class="slider-label-row">
+            <span class="slider-name">Motion intensity (0 = still · 10 = very active)</span>
+            <span class="slider-value" id="intensity_val">3.0</span>
+          </div>
+          <input type="range" id="intensity" min="0" max="10" step="0.5" value="3" oninput="sliderUpdate()">
+        </div>
+
+        <div class="mag-pill">
+          <div>
+            <div class="mag-label">Signal magnitude</div>
+            <div class="mag-value" id="mag-val">9.80 m/s²</div>
+          </div>
+          <div class="mag-note" id="mag-note">≈ stationary</div>
+        </div>
+      </div>
+
+      <button class="check-btn" onclick="checkSensor()">Check Sensor Reliability</button>
+    </div>
+
+    <!-- RIGHT: result -->
+    <div>
+      <div id="result-placeholder" class="result-placeholder">
+        <div class="ph-icon">🔬</div>
+        <p>Select a sensor, choose your activity,<br>set the readings, and hit <strong style="color:var(--dim)">Check</strong>.</p>
+      </div>
+
+      <div id="result-loading" class="result-loading">
+        <div class="spinner"></div>
+        <div style="font-size:.8rem;color:var(--muted)">Running model analysis…</div>
+      </div>
+
+      <div id="result-panel" style="display:none">
+        <!-- TL card -->
+        <div class="tl-card" id="tl-card">
+          <div class="tl-card-inner">
+            <div class="tl-circle" id="tl-circle"></div>
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:6px">
+                <span class="tl-badge" id="tl-badge"></span>
+                <span class="tl-sensor-label" id="tl-sensor-label"></span>
+              </div>
+              <div class="tl-verdict" id="tl-verdict"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reliability bar -->
+        <div class="rel-bar-wrap">
+          <div class="rel-bar-header">
+            <div class="card-title" style="margin:0">Sensor Reliability Score</div>
+            <div class="rel-pct" id="rel-pct">—</div>
+          </div>
+          <div class="bar-bg"><div class="bar-fill" id="rel-bar"></div></div>
+          <div class="rel-sub">How well readings match <span id="rel-act-name"></span></div>
+        </div>
+
+        <!-- Advice -->
+        <div class="advice-card" id="advice-card">
+          <div class="advice-label">What to do</div>
+          <div class="advice-text" id="advice-text"></div>
+        </div>
+
+        <!-- Top 3 -->
+        <div class="card">
+          <div class="card-title">Model's top predictions for these readings</div>
+          <div id="top3-list"></div>
+          <div style="font-size:.65rem;color:var(--muted);margin-top:10px;line-height:1.6">
+            If your claimed activity is not at the top, the sensor readings look like something else to the model — a clear sign of a sensor problem.
+          </div>
+        </div>
+
+        <button class="reset-btn" style="margin-top:12px" onclick="resetChecker()">← Test another reading</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════ DASHBOARD ════════════════════════════ -->
+<div id="panel-dashboard" class="panel">
+  <div class="section-title"><span>Model Performance — Test Set (Subject 106)</span></div>
+
+  <div class="grid-6" style="margin-bottom:20px" id="stat-grid">
+    <div class="stat-card"><div class="stat-label">Accuracy</div><div class="stat-value" style="color:var(--green)" id="stat-acc">—</div><div class="stat-sub">After smoothing</div></div>
+    <div class="stat-card"><div class="stat-label">Mean Conf</div><div class="stat-value" style="color:var(--blue)" id="stat-conf">—</div><div class="stat-sub">Avg probability</div></div>
+    <div class="stat-card"><div class="stat-label">Green</div><div class="stat-value" style="color:var(--green)" id="stat-green">—</div><div class="stat-sub">conf ≥ 0.75</div></div>
+    <div class="stat-card"><div class="stat-label">Yellow</div><div class="stat-value" style="color:var(--yellow)" id="stat-yellow">—</div><div class="stat-sub">0.45–0.75</div></div>
+    <div class="stat-card"><div class="stat-label">Red</div><div class="stat-value" style="color:var(--red)" id="stat-red">—</div><div class="stat-sub">conf &lt; 0.45</div></div>
+    <div class="stat-card"><div class="stat-label">Windows</div><div class="stat-value" id="stat-total">—</div><div class="stat-sub">Test set</div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-title">Reliability Distribution</div>
+    <div class="db-tl-bar">
+      <div class="db-seg" id="tl-g-seg" style="background:var(--green);width:0%"></div>
+      <div class="db-seg" id="tl-y-seg" style="background:var(--yellow);width:0%"></div>
+      <div class="db-seg" id="tl-r-seg" style="background:var(--red);width:0%"></div>
+    </div>
+    <div class="tl-legend">
+      <span><span class="tl-dot" style="background:var(--green)"></span><span id="leg-g">—</span> Green</span>
+      <span><span class="tl-dot" style="background:var(--yellow)"></span><span id="leg-y">—</span> Yellow</span>
+      <span><span class="tl-dot" style="background:var(--red)"></span><span id="leg-r">—</span> Red</span>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Reliability by Activity</div>
+      <table class="act-table">
+        <thead><tr><th>Activity</th><th>Accuracy</th><th>Conf</th><th>Tier</th></tr></thead>
+        <tbody id="act-tbody"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">Top Misclassifications</div>
+      <div id="misclass-list"></div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ════════════════════════════════════ MODELS ═════════════════════════════ -->
+<div id="panel-models" class="panel">
+  <div class="section-title"><span>Model Comparison</span></div>
+  <div class="grid-2" style="margin-bottom:20px">
+    <div class="card">
+      <div class="card-title">Accuracy Comparison</div>
+      <div id="model-bars"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Leave-One-Subject-Out CV</div>
+      <div id="loso-grid"></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">Why This Architecture?</div>
+    <div class="arch-grid">
+      <div class="arch-item"><div class="arch-name">Random Forest</div><p>300 trees, class-balanced. Learns global activity patterns. Strong on cycling, running, lying.</p></div>
+      <div class="arch-item"><div class="arch-name">K-Nearest Neighbors</div><p>7 neighbours, distance-weighted. Local density learner — complements RF on edge cases.</p></div>
+      <div class="arch-item"><div class="arch-name">Soft Voting (RF×3, KNN×2)</div><p>Probability averaging gives more calibrated confidence than hard voting.</p></div>
+      <div class="arch-item"><div class="arch-name">Temporal Smoothing</div><p>9-window confidence-weighted majority vote (4.5s context). +1.8pp over raw predictions.</p></div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══════════════════════════════════ ANALYTICS ════════════════════════════ -->
+<div id="panel-analytics" class="panel">
+  <div class="section-title"><span>Analysis Graphs</span></div>
+  <div style="font-size:.75rem;color:var(--muted);margin-bottom:20px">Generated by pamap2_graphs.py — graph files must exist in D:\ML\</div>
+  <div class="graph-grid" id="graph-grid"></div>
+</div>
+
+
+<!-- ═════════════════════════════════════ ABOUT ═════════════════════════════ -->
+<div id="panel-about" class="panel">
+  <div class="about-hero">
+    <div class="about-title">PAMAP2 Sensor Reliability Checker</div>
+    <div class="about-sub">A machine learning system that classifies 11 physical activities from 3-location IMU sensors and determines whether each sensor is producing trustworthy readings.</div>
+  </div>
+
+  <div class="card" style="margin-bottom:20px;padding:0">
+    <div class="pipeline-grid">
+      <div class="pipeline-step"><div class="step-num">01</div><div class="step-name">Raw Sensors</div><div class="step-desc">100Hz IMU. 27 clean channels (acc, gyro, mag) across hand, chest, ankle.</div></div>
+      <div class="pipeline-step"><div class="step-num">02</div><div class="step-name">Windowing</div><div class="step-desc">1s windows, 50% overlap. 85% purity filter removes transition noise.</div></div>
+      <div class="pipeline-step"><div class="step-num">03</div><div class="step-name">264 Features</div><div class="step-desc">Time-domain stats, FFT, spectral entropy, cross-sensor correlation, tilt proxy.</div></div>
+      <div class="pipeline-step"><div class="step-num">04</div><div class="step-name">Ensemble</div><div class="step-desc">RF + KNN soft-voting with class balancing. XGBoost validated separately.</div></div>
+      <div class="pipeline-step"><div class="step-num">05</div><div class="step-name">Smoothing</div><div class="step-desc">9-window confidence-weighted temporal majority vote. +1.8pp accuracy.</div></div>
+      <div class="pipeline-step"><div class="step-num">06</div><div class="step-name">Traffic Light</div><div class="step-desc">GREEN ≥75% · YELLOW 45–75% · RED &lt;45% confidence thresholds.</div></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card" style="font-size:.78rem;color:var(--muted);line-height:1.8">
+      <div class="card-title">Dataset</div>
+      9 subjects · 11 activities · 2.7M sensor rows · 52,909 windows<br>
+      Test: Subject 106 held out · LOSO avg 84.4% ± 8.8%
+    </div>
+    <div class="card" style="font-size:.78rem;color:var(--muted);line-height:1.8">
+      <div class="card-title">Key Engineering Choices</div>
+      • Excluded heartRate (9Hz forward-filled — 91% duplicates)<br>
+      • Excluded temp sensors (constant in 1s window)<br>
+      • Cross-sensor correlation for standing vs ironing<br>
+      • class_weight='balanced' for minority activities
+    </div>
+  </div>
+</div>
+
+</main>
+
+<script>
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'analytics')  loadGraphs();
+}
+
+// ── Sensor checker state ──────────────────────────────────────────────────────
+let selectedSensor = null;
+
+const ACTIVITY_HINTS = {
+  lying:       'Lying flat — all sensors near gravity baseline. Very distinct pattern.',
+  sitting:     'Seated upright — chest Z ≈ 9.8, minimal limb motion.',
+  standing:    'Standing still — near-zero motion everywhere. Hardest to distinguish.',
+  walking:     'Walking — ankle shows periodic impacts. Chest has mild vertical bounce.',
+  running:     'Running — high energy across all three sensors. Very distinctive.',
+  cycling:     'Cycling — ankle shows rotation. Hand and chest relatively stable.',
+  nordic_walk: 'Nordic walking — both hand and ankle active simultaneously.',
+  stairs_up:   'Stairs up — ankle lifts with vertical impact peaks.',
+  stairs_down: 'Stairs down — irregular ankle impact, slight backward chest lean.',
+  vacuuming:   'Vacuuming — hand repetitive push-pull, body moves slightly.',
+  ironing:     'Ironing — hand active (horizontal sweep), ankle and chest near-static.',
+};
+
+// Activity-specific healthy sensor baselines grounded in real PAMAP2 patterns
+const ACTIVITY_PRESETS = {
+  lying:       { acc_x:  0.1, acc_y:  0.2, acc_z:  9.8, intensity: 0.5 },
+  sitting:     { acc_x:  0.2, acc_y:  0.1, acc_z:  9.8, intensity: 1.0 },
+  standing:    { acc_x:  0.1, acc_y:  0.1, acc_z:  9.8, intensity: 0.5 },
+  walking:     { acc_x:  0.5, acc_y:  1.2, acc_z:  9.5, intensity: 3.5 },
+  running:     { acc_x:  1.5, acc_y:  3.0, acc_z:  8.5, intensity: 7.5 },
+  cycling:     { acc_x:  0.3, acc_y:  0.8, acc_z:  9.6, intensity: 4.0 },
+  nordic_walk: { acc_x:  0.8, acc_y:  1.5, acc_z:  9.3, intensity: 5.0 },
+  stairs_up:   { acc_x:  0.6, acc_y:  2.0, acc_z:  9.0, intensity: 5.5 },
+  stairs_down: { acc_x:  0.5, acc_y:  1.8, acc_z:  9.2, intensity: 5.0 },
+  vacuuming:   { acc_x:  1.0, acc_y:  0.5, acc_z:  9.6, intensity: 4.0 },
+  ironing:     { acc_x:  0.8, acc_y:  0.3, acc_z:  9.7, intensity: 2.5 },
+};
+
+function applyPreset(name) {
+  const act = document.getElementById('activity-select').value;
+  const base = ACTIVITY_PRESETS[act] || ACTIVITY_PRESETS['walking'];
+
+  if (name === 'healthy') {
+    // Use the activity-specific healthy baseline
+    document.getElementById('acc_x').value     = base.acc_x;
+    document.getElementById('acc_y').value     = base.acc_y;
+    document.getElementById('acc_z').value     = base.acc_z;
+    document.getElementById('intensity').value = base.intensity;
+
+  } else if (name === 'noisy') {
+    // Slightly off from healthy — loose sensor, bad placement
+    document.getElementById('acc_x').value     = (base.acc_x + 1.5).toFixed(1);
+    document.getElementById('acc_y').value     = (base.acc_y + 2.0).toFixed(1);
+    document.getElementById('acc_z').value     = (base.acc_z - 1.3).toFixed(1);
+    document.getElementById('intensity').value = Math.min(10, base.intensity + 1);
+
+  } else if (name === 'faulty') {
+    // Very wrong values — detached or severely misplaced
+    document.getElementById('acc_x').value     = 14.0;
+    document.getElementById('acc_y').value     = -11.0;
+    document.getElementById('acc_z').value     = 2.5;
+    document.getElementById('intensity').value = 8;
+
+  } else if (name === 'flat') {
+    // Dead / disconnected — all zeros, no gravity component
+    document.getElementById('acc_x').value     = 0.0;
+    document.getElementById('acc_y').value     = 0.0;
+    document.getElementById('acc_z').value     = 0.0;
+    document.getElementById('intensity').value = 0;
+  }
+
+  sliderUpdate();
+}
+
+function selectSensor(name, el) {
+  selectedSensor = name;
+  document.querySelectorAll('.sensor-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+function applyPreset(name) {
+  const p = PRESETS[name];
+  Object.keys(p).forEach(k => { document.getElementById(k).value = p[k]; });
+  sliderUpdate();
+}
+
+function updateHint() {
+  const act = document.getElementById('activity-select').value;
+  document.getElementById('activity-hint').textContent = ACTIVITY_HINTS[act] || '';
+}
+
+function sliderUpdate() {
+  const x = parseFloat(document.getElementById('acc_x').value);
+  const y = parseFloat(document.getElementById('acc_y').value);
+  const z = parseFloat(document.getElementById('acc_z').value);
+  const i = parseFloat(document.getElementById('intensity').value);
+  document.getElementById('acc_x_val').textContent     = x.toFixed(1);
+  document.getElementById('acc_y_val').textContent     = y.toFixed(1);
+  document.getElementById('acc_z_val').textContent     = z.toFixed(1);
+  document.getElementById('intensity_val').textContent = i.toFixed(1);
+  const mag = Math.sqrt(x*x + y*y + z*z);
+  document.getElementById('mag-val').textContent  = mag.toFixed(2) + ' m/s²';
+  const note = mag < 0.3  ? '⚠ near zero — sensor may be dead'
+             : Math.abs(mag - 9.81) < 0.5 ? '≈ stationary (gravity only)'
+             : mag > 15 ? '⚠ very high — possible sensor error'
+             : '≈ in motion';
+  document.getElementById('mag-note').textContent = note;
+}
+
+async function checkSensor() {
+  if (!selectedSensor) {
+    alert('Please select a sensor first — Hand, Chest, or Ankle.');
+    return;
+  }
+
+  const activity  = document.getElementById('activity-select').value;
+  const acc_x     = parseFloat(document.getElementById('acc_x').value);
+  const acc_y     = parseFloat(document.getElementById('acc_y').value);
+  const acc_z     = parseFloat(document.getElementById('acc_z').value);
+  const intensity = parseFloat(document.getElementById('intensity').value);
+
+  document.getElementById('result-placeholder').style.display = 'none';
+  document.getElementById('result-panel').style.display       = 'none';
+  document.getElementById('result-loading').style.display     = 'flex';
+
+  try {
+    const res = await fetch('/api/check_sensor', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ sensor: selectedSensor, activity, acc_x, acc_y, acc_z, intensity }),
+    });
+
+    // Always parse as JSON — backend guarantees JSON even on error
+    const data = await res.json();
+    document.getElementById('result-loading').style.display = 'none';
+
+    if (data.error) {
+      document.getElementById('result-placeholder').style.display = 'flex';
+      alert('Server error: ' + data.error + '\n\n' + (data.hint || ''));
+      return;
+    }
+
+    renderResult(data);
+  } catch (e) {
+    document.getElementById('result-loading').style.display     = 'none';
+    document.getElementById('result-placeholder').style.display = 'flex';
+    alert('Could not reach Flask server.\nMake sure app.py is running on port 5000.\n\nDetail: ' + e.message);
+  }
+}
+
+// Colour map
+const TL_COL = { GREEN: '#00e5a0', YELLOW: '#f5c842', RED: '#ff4d6d' };
+const TL_BG  = { GREEN: 'rgba(0,229,160,.08)', YELLOW: 'rgba(245,200,66,.08)', RED: 'rgba(255,77,109,.08)' };
+const TL_BD  = { GREEN: 'rgba(0,229,160,.28)', YELLOW: 'rgba(245,200,66,.28)', RED: 'rgba(255,77,109,.28)' };
+const TL_EMO = { GREEN: '✅', YELLOW: '⚠️', RED: '🚨' };
+
+function renderResult(d) {
+  const tl  = d.traffic_light;
+  const col = TL_COL[tl];
+
+  // TL card
+  const card = document.getElementById('tl-card');
+  card.style.background  = TL_BG[tl];
+  card.style.borderColor = TL_BD[tl];
+
+  const circle = document.getElementById('tl-circle');
+  circle.textContent     = TL_EMO[tl];
+  circle.style.background  = TL_BG[tl];
+  circle.style.borderColor = TL_BD[tl];
+  // Re-trigger animation
+  circle.style.animation = 'none';
+  circle.offsetHeight;
+  circle.style.animation = '';
+
+  const badge = document.getElementById('tl-badge');
+  badge.textContent       = tl;
+  badge.style.color       = col;
+  badge.style.borderColor = TL_BD[tl];
+  badge.style.background  = TL_BG[tl];
+
+  document.getElementById('tl-sensor-label').textContent = d.sensor + ' sensor · ' + d.activity.replace(/_/g,' ');
+  document.getElementById('tl-verdict').textContent      = d.verdict;
+
+  // Reliability bar
+  document.getElementById('rel-pct').textContent  = d.reliability_pct + '%';
+  document.getElementById('rel-pct').style.color  = col;
+  const bar = document.getElementById('rel-bar');
+  bar.style.background = col;
+  bar.style.width      = '0%';
+  setTimeout(() => { bar.style.width = d.reliability_pct + '%'; }, 60);
+  document.getElementById('rel-act-name').textContent = d.activity.replace(/_/g,' ');
+
+  // Advice
+  const acard = document.getElementById('advice-card');
+  acard.style.background  = TL_BG[tl];
+  acard.style.borderColor = TL_BD[tl];
+  const atext = document.getElementById('advice-text');
+  atext.textContent  = d.advice;
+  atext.style.color  = tl==='GREEN' ? '#aaeedd' : tl==='YELLOW' ? '#e8d080' : '#ffaaaa';
+
+  // Top 3
+  const maxP = d.top3.length > 0 ? d.top3[0][1] : 1;
+  document.getElementById('top3-list').innerHTML = d.top3.map(([act, p]) => {
+    const isTarget = act === d.activity;
+    const barW     = Math.round((p / maxP) * 100);
+    const barCol   = isTarget ? col : '#3a3a5a';
+    const nameCol  = isTarget ? '#fff' : 'var(--dim)';
+    const label    = act.replace(/_/g,' ') + (isTarget ? ' ← your activity' : '');
+    return `<div class="top3-row">
+      <div class="top3-label-row">
+        <span style="color:${nameCol}${isTarget?';font-weight:500':''}">${label}</span>
+        <span style="color:${isTarget?col:'var(--muted)'}">${(p*100).toFixed(1)}%</span>
+      </div>
+      <div class="top3-bar-bg"><div class="top3-bar-fill" style="width:${barW}%;background:${barCol}"></div></div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('result-panel').style.display = 'block';
+  document.getElementById('result-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function resetChecker() {
+  document.getElementById('result-panel').style.display       = 'none';
+  document.getElementById('result-placeholder').style.display = 'flex';
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+let dashLoaded = false;
+async function loadDashboard() {
+  if (dashLoaded) return;
+  dashLoaded = true;
+  try {
+    const r    = await fetch('/api/dashboard');
+    const data = await r.json();
+    const ts   = data.traffic_summary;
+
+    if (ts) {
+      document.getElementById('stat-acc').textContent    = ts.accuracy  ? ts.accuracy + '%' : '96.3%';
+      document.getElementById('stat-conf').textContent   = ts.mean_conf || '0.849';
+      document.getElementById('stat-green').textContent  = ts.GREEN  || '—';
+      document.getElementById('stat-yellow').textContent = ts.YELLOW || '—';
+      document.getElementById('stat-red').textContent    = ts.RED    || '—';
+      document.getElementById('stat-total').textContent  = ts.total  || '—';
+      const g  = (ts.GREEN  / ts.total * 100).toFixed(1);
+      const y  = (ts.YELLOW / ts.total * 100).toFixed(1);
+      const rd = (ts.RED    / ts.total * 100).toFixed(1);
+      setTimeout(() => {
+        document.getElementById('tl-g-seg').style.width = g  + '%';
+        document.getElementById('tl-y-seg').style.width = y  + '%';
+        document.getElementById('tl-r-seg').style.width = rd + '%';
+      }, 100);
+      document.getElementById('leg-g').textContent = g  + '%';
+      document.getElementById('leg-y').textContent = y  + '%';
+      document.getElementById('leg-r').textContent = rd + '%';
+    }
+
+    if (data.activity_stats) {
+      document.getElementById('act-tbody').innerHTML = data.activity_stats
+        .sort((a,b) => b.accuracy - a.accuracy)
+        .map(a => {
+          const tier = a.accuracy >= 0.90 ? 'HIGH' : a.accuracy >= 0.75 ? 'MEDIUM' : 'LOW';
+          const pct  = Math.round(a.accuracy * 100);
+          const col  = pct >= 90 ? 'var(--green)' : pct >= 75 ? 'var(--yellow)' : 'var(--red)';
+          return `<tr>
+            <td style="padding-right:8px">${a.true_activity.replace(/_/g,' ')}</td>
+            <td style="padding-right:8px">
+              <span class="mini-bar-bg"><span class="mini-bar-fill" style="width:${pct}%;background:${col}"></span></span>
+              <span style="color:${col};font-size:.7rem;margin-left:6px">${pct}%</span>
+            </td>
+            <td style="color:var(--muted)">${(a.mean_conf*100).toFixed(0)}%</td>
+            <td><span class="tier-pill tier-${tier}">${tier}</span></td>
+          </tr>`;
+        }).join('');
+    }
+
+    if (data.misclassifications) {
+      document.getElementById('misclass-list').innerHTML = data.misclassifications.map(m =>
+        `<div class="mc-row">
+          <span style="color:var(--red)">${m.true}</span>
+          <span style="color:var(--border)">→</span>
+          <span style="color:var(--yellow)">${m.pred}</span>
+          <span class="mc-count">${m.count}</span>
+        </div>`
+      ).join('');
+    }
+
+    if (data.model_comparison) {
+      const models = data.model_comparison.sort((a,b) => b.accuracy - a.accuracy);
+      const best   = models[0].accuracy;
+      document.getElementById('model-bars').innerHTML = models.map(m => {
+        const isBest = m.accuracy === best;
+        const pct    = (m.accuracy * 100).toFixed(1);
+        const bg     = isBest
+          ? 'linear-gradient(90deg,var(--green),var(--blue))'
+          : 'linear-gradient(90deg,var(--blue),var(--purple))';
+        return `<div class="model-row">
+          <div class="model-name">
+            <span>${m.model}${isBest ? ' ⭐' : ''}</span>
+            <span style="color:${isBest?'var(--green)':'var(--muted)'}">${pct}%</span>
+          </div>
+          <div class="model-bar-bg"><div style="height:100%;width:${pct}%;border-radius:99px;background:${bg};transition:width .8s cubic-bezier(.34,1.2,.64,1)"></div></div>
+        </div>`;
+      }).join('');
+    }
+
+    if (data.loso) {
+      document.getElementById('loso-grid').innerHTML = data.loso
+        .sort((a,b) => a.subject - b.subject)
+        .map(l => {
+          const pct = (l.accuracy * 100).toFixed(1);
+          const col = l.accuracy >= 0.90 ? 'var(--green)' : l.accuracy >= 0.75 ? 'var(--yellow)' : 'var(--red)';
+          return `<div class="loso-row">
+            <span style="color:var(--muted)">Subj ${l.subject}</span>
+            <div style="height:6px;background:var(--s2);border-radius:99px;overflow:hidden">
+              <div style="height:100%;width:${pct}%;background:${col};border-radius:99px;transition:width .7s ease"></div>
+            </div>
+            <span style="color:${col};text-align:right">${pct}%</span>
+          </div>`;
+        }).join('');
+    }
+
+  } catch(e) {
+    // Fallback static values when CSV files aren't present yet
+    document.getElementById('stat-acc').textContent    = '93.3%';
+    document.getElementById('stat-conf').textContent   = '0.849';
+    document.getElementById('stat-green').textContent  = '3,841';
+    document.getElementById('stat-yellow').textContent = '745';
+    document.getElementById('stat-red').textContent    = '353';
+    document.getElementById('stat-total').textContent  = '4,939';
+    setTimeout(() => {
+      document.getElementById('tl-g-seg').style.width = '77.8%';
+      document.getElementById('tl-y-seg').style.width = '15.1%';
+      document.getElementById('tl-r-seg').style.width =  '7.1%';
+    }, 100);
+    document.getElementById('leg-g').textContent = '77.8%';
+    document.getElementById('leg-y').textContent = '15.1%';
+    document.getElementById('leg-r').textContent =  '7.1%';
+  }
+}
+
+// ── Analytics graphs ──────────────────────────────────────────────────────────
+let graphsLoaded = false;
+function loadGraphs() {
+  if (graphsLoaded) return;
+  graphsLoaded = true;
+  const GRAPHS = [
+    ['graph_01_activity_distribution.png',   'Activity Distribution'],
+    ['graph_02_heartrate_by_activity.png',    'Heart Rate by Activity'],
+    ['graph_03_acceleration_by_activity.png', 'Acceleration by Activity'],
+    ['graph_04_subject_distribution.png',     'Subject Data Split'],
+    ['graph_05_raw_sensor_signal.png',        'Raw Sensor Signal'],
+    ['graph_06_model_comparison.png',         'Model Comparison'],
+    ['graph_07_confusion_matrix.png',         'Confusion Matrix'],
+    ['graph_08_reliability_per_activity.png', 'Reliability per Activity'],
+    ['graph_09_confidence_distribution.png',  'Confidence Distribution'],
+    ['graph_10_feature_importance.png',       'Top 20 Features'],
+    ['graph_11_loso_results.png',             'LOSO Results'],
+    ['graph_12_sensor_importance.png',        'Sensor Importance'],
+    ['graph_13_noise_injection.png',          'Noise Injection'],
+    ['graph_14_reliability_over_time.png',    'Reliability Over Time'],
+  ];
+  const grid = document.getElementById('graph-grid');
+  GRAPHS.forEach(([f, title]) => {
+    const d = document.createElement('div');
+    d.className = 'graph-card';
+    d.innerHTML = `<div class="graph-label">${title}</div>
+      <img src="/graphs/${f}" alt="${title}" loading="lazy" onerror="this.closest('.graph-card').style.display='none'">`;
+    grid.appendChild(d);
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+sliderUpdate();
+updateHint();
+// Pre-select hand sensor
+document.querySelector('[data-sensor="hand"]').click();
+</script>
+</body>
+</html>

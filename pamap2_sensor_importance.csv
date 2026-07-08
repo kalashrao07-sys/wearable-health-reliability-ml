@@ -1,0 +1,4 @@
+sensor,accuracy_without,accuracy_drop
+hand,0.9002,0.0142
+chest,0.9534,-0.0391
+ankle,0.9737,-0.0593

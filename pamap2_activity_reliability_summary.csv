@@ -1,0 +1,12 @@
+true_activity,accuracy,avg_conf,n,green_%,yellow_%,red_%,reliability_tier
+cycling,1.0,0.927,407,93.4,3.9,2.7,HIGH
+ironing,0.999,0.856,750,82.3,17.2,0.5,HIGH
+walking,0.996,0.859,506,82.4,13.8,3.8,HIGH
+lying,0.994,0.96,465,93.3,3.9,2.8,HIGH
+nordic_walk,0.992,0.941,529,94.7,3.0,2.3,HIGH
+stairs_down,0.987,0.816,223,76.7,15.7,7.6,HIGH
+vacuuming,0.981,0.759,419,62.5,25.3,12.2,HIGH
+running,0.977,0.94,442,92.5,1.1,6.3,HIGH
+sitting,0.969,0.875,454,83.3,13.0,3.7,HIGH
+stairs_up,0.955,0.797,264,75.8,12.5,11.7,HIGH
+standing,0.765,0.569,480,9.2,67.3,23.5,MEDIUM
