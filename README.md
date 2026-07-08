@@ -43,11 +43,44 @@ Unlike traditional HAR systems that only classify activities, this framework est
 
 # 📂 Dataset
 
-**Dataset:** PAMAP2 Physical Activity Monitoring Dataset
+This project uses the **PAMAP2 Physical Activity Monitoring Dataset**, a benchmark dataset widely used for Human Activity Recognition (HAR) research.
 
-**Source:** UCI Machine Learning Repository
+### Dataset Information
 
-The dataset contains synchronized wearable sensor recordings collected from multiple subjects performing daily activities.
+- **Dataset Name:** PAMAP2 Physical Activity Monitoring Dataset
+- **Source:** UCI Machine Learning Repository
+- **Subjects:** 9 Protocol Subjects + 5 Optional Subjects
+- **Sensors:** Hand IMU, Chest IMU, Ankle IMU, Heart Rate Monitor
+- **Sampling Frequency:** 100 Hz
+- **Activities:** 11 Daily Physical Activities
+
+### 🔗 Dataset Link
+
+**UCI Machine Learning Repository**
+
+https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring
+
+### Original Dataset Citation
+
+Reiss, A. & Stricker, D. (2012). *Introducing a New Benchmarked Dataset for Activity Monitoring*. Proceedings of the 16th International Symposium on Wearable Computers (ISWC 2012).
+
+
+### Dataset Setup
+
+Due to GitHub's file size limitations, the original PAMAP2 dataset is **not included** in this repository.
+
+After downloading the dataset:
+
+1. Extract the dataset.
+2. Copy all Protocol and Optional subject files into the `data/` directory.
+3. Run the preprocessing script:
+
+```bash
+python scripts/pamap2_preprocessing.py
+```
+
+This will generate the processed dataset required for model training.
+
 
 ### Sensors Used
 
@@ -247,6 +280,14 @@ wearable-health-reliability-ml
 └── README.md
 ```
 
+---
+
+## 🔗 Quick Links
+
+- 🌐 **Live Demo:** *(Coming Soon)*
+- 📊 **Google Sites Portfolio:** https://sites.google.com/kletech.ac.in/mld-div053/home
+- 📂 **Dataset (UCI):** https://archive.ics.uci.edu/dataset/231/pamap2+physical+activity+monitoring
+  
 ---
 
 # 🚀 Installation
