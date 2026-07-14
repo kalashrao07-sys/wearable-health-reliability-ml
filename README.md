@@ -9,6 +9,11 @@
 ![Status](https://img.shields.io/badge/Status-Research%20Project-success)
 
 ---
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Render-46E3B7?style=for-the-badge)](https://wearable-health-reliabilty-ml.onrender.com/)
+[![Demo Video](https://img.shields.io/badge/Demo%20Video-Click_Me-FF0000?style=for-the-badge)](https://youtu.be/YOUR_VIDEO_LINK)
+[![Code Implementation Video](https://img.shields.io/badge/Code%20Implementation_Video-Click_Me-FF0000?style=for-the-badge)](https://youtu.be/YOUR_VIDEO_LINK)
+
+---
 
 ## 📌 Project Overview
 
