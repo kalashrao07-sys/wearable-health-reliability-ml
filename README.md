@@ -10,8 +10,8 @@
 
 ---
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Render-46E3B7?style=for-the-badge)](https://wearable-health-reliabilty-ml.onrender.com/)
-[![Demo Video](https://img.shields.io/badge/Demo%20Video-Click_Me-FF0000?style=for-the-badge)](https://youtu.be/YOUR_VIDEO_LINK)
-[![Code Implementation Video](https://img.shields.io/badge/Code%20Implementation_Video-Click_Me-FF0000?style=for-the-badge)](https://youtu.be/YOUR_VIDEO_LINK)
+[![Demo Video](https://img.shields.io/badge/Demo%20Video-Click_Me-FF0000?style=for-the-badge)](https://drive.google.com/file/d/1OYFXhAnZMtTZt0Ui7jVDu8DE4F6geUjQ/view?usp=sharing)
+[![Code Implementation Video](https://img.shields.io/badge/Code%20Implementation_Video-Click_Me-FF0000?style=for-the-badge)](https://drive.google.com/file/d/1jN4Oq8kZOprzUJLoQew2rhOxv70D5sif/view?usp=sharing)
 
 ---
 
