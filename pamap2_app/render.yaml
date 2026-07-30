@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: wearable-health-reliability
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn pamap2_app.app:app
