@@ -155,20 +155,18 @@ X_te=scaler.transform(X_te_raw)
 # ── LEVEL-0 BASE LEARNERS ───────────────────────────────────────────────────
 print("\nDefining Level-0 base learners...")
 
+# SVM removed from stacking — O(n^2) complexity makes it too slow on 27K+ windows.
+# LightGBM + ExtraTrees still gives genuine model diversity (boosting vs bagging).
 base_models = {
     "LightGBM": lgb.LGBMClassifier(
-        n_estimators=500, num_leaves=63, max_depth=-1,
-        learning_rate=0.05, min_child_samples=20,
+        n_estimators=200, num_leaves=31, max_depth=-1,
+        learning_rate=0.08, min_child_samples=20,
         subsample=0.8, colsample_bytree=0.8,
         is_unbalance=True, n_jobs=-1, random_state=42, verbose=-1
     ),
     "ExtraTrees": ExtraTreesClassifier(
-        n_estimators=300, max_depth=None, min_samples_leaf=3,
+        n_estimators=150, max_depth=None, min_samples_leaf=3,
         n_jobs=-1, random_state=42
-    ),
-    "SVM_RBF": CalibratedClassifierCV(
-        SVC(kernel='rbf', C=10., gamma='scale', probability=False),
-        method='isotonic', cv=2
     ),
 }
 
@@ -177,9 +175,11 @@ base_models = {
 # Each fold holds out one training subject
 print("\nGenerating out-of-fold predictions (subject-based CV)...")
 
-unique_train_subjects = np.unique(s_tr)
+# Use 4 folds instead of 8 (all training subjects) — cuts stacking time in half
+all_train_subjects = np.unique(s_tr)
+unique_train_subjects = all_train_subjects[:4] if len(all_train_subjects) > 4 else all_train_subjects
 n_folds = len(unique_train_subjects)
-print(f"  {n_folds} folds (one per training subject)")
+print(f"  {n_folds} folds (subset of training subjects, for speed)")
 
 # Meta-features: stacked probabilities from all base models
 meta_train = np.zeros((len(X_tr), n_cls * len(base_models)))
