@@ -18,27 +18,52 @@ Why PCA to 16 dims:
 Install: pip install pennylane pennylane-lightning
 Run AFTER pamap2_ml_model.py (needs pamap2_combined.csv + pamap2_feature_cols.json)
 
-── SPEED OPTIMISATIONS APPLIED (results unchanged, same math) ───────────────
-  1. Device: default.qubit -> lightning.qubit (C++ backend, same statevector
-     simulation, no approximation).
-  2. Diff method: autograd backprop -> adjoint differentiation. Exact
-     gradients, much lower memory/time for this qubit count. (autograd
-     backprop through a 16-qubit statevector was in fact OOM-crashing on
-     the original code path at typical batch sizes — adjoint avoids this.)
-  3. VQC training: cost() now mini-batches (64 samples/epoch) instead of
-     evaluating the full ~2000-sample balanced set every epoch — this
-     matches the mini-batching pattern the ORIGINAL script already used
-     for QTL training. Adam is designed for stochastic mini-batches, so
-     this is not an approximation hack, it's applying the same proven
-     approach used elsewhere in this file.
-  4. Final VQC full-test-set prediction now reuses the existing VQC-test
-     subsample (X_te_q/y_te_q) instead of re-running inference on the
-     entire un-subsampled test set — everywhere else in the script the
-     comparison metrics are already computed on the subsample, so this
-     removes a redundant, much larger inference pass without changing
-     any reported number.
-  5. QKSVM kernel matrix: exploits symmetry of K_train (K[i,j]==K[j,i],
-     diagonal==1) instead of computing all n1*n2 entries independently.
+── SPEED OPTIMISATIONS (results equivalent, same math) ───────────────────
+  1. Device: default.qubit -> lightning.qubit (C++ backend, no approximation).
+  2. Diff method: autograd backprop -> adjoint differentiation for circuits
+     that only return expectation values (VQC, QTL). The QKSVM kernel
+     circuit returns qml.probs(), which adjoint doesn't support, so it
+     keeps the default diff method (it's forward-only anyway — no
+     gradients are taken through it).
+  3. QKSVM train-train kernel block exploits symmetry (K[i,j]==K[j,i]).
+
+── CORRECTNESS FIXES (from review; results WILL change, for the better) ───
+  1. VQC training now does true multi-batch epochs (iterates over ALL
+     mini-batches per epoch) instead of one 64-sample batch = one epoch.
+     The old code gave each of the 11 OvR classifiers only 25 total
+     gradient updates; this version gives ~30x more per epoch and runs
+     several epochs with early stopping.
+  2. Near/below-random VQC accuracy is now flagged with an explicit
+     warning instead of being silently printed as a finished result.
+  3. VQC/QTL subsampling is now stratified per class (previously a single
+     global random draw, which could under-represent some classes).
+  4. VQC now has a proper validation split (carved from TRAINING subjects
+     only, never the held-out test subject) with early stopping on
+     validation loss, and returns the best-validation-loss weights.
+  5. Angle-embedding normalisation now fits min/max on TRAIN data only and
+     applies that fixed transform to test data (previously each split was
+     scaled independently, which is a train/test inconsistency).
+  6. QKSVM test-set leakage FIXED: the previous version trained the
+     kernel SVM on windows from the held-out TEST_SUBJECT and evaluated
+     on more windows from that same subject. Training data now comes
+     exclusively from training subjects; test data exclusively from the
+     held-out subject, with disjoint indices.
+  7. QKSVM kernel circuit now actually implements the Hadamard-based
+     feature map its docstring described (previously the docstring
+     mentioned Hadamards that weren't in the circuit).
+  8. QTL's broken `class % 4` training objective is replaced with a
+     contrastive (same-class-pull / different-class-push) objective that
+     is well-defined for all 11 classes, instead of silently collapsing
+     multiple classes onto the same 4-dim one-hot target.
+  9. VQC, QKSVM, and QTL now all use the SAME held-out-subject protocol
+     and comparable stratified sample sizes, so the three-way comparison
+     is apples-to-apples. Sample sizes and subsampling are explicitly
+     printed/disclosed at each stage rather than left implicit.
+ 10. Per-classifier random seeding added for VQC (RANDOM_SEED + cls_idx)
+     for reproducibility. Running the whole script multiple times with
+     different RANDOM_SEED values and reporting mean±std across seeds is
+     recommended for a research write-up (not automated here, since it
+     multiplies runtime by the seed count — see note near RANDOM_SEED).
 """
 
 import numpy as np
@@ -223,14 +248,27 @@ X_te_pca=pca.transform(X_te_sc)
 var_explained=pca.explained_variance_ratio_.cumsum()[-1]
 print(f"\nPCA: {N_QUBITS} components explain {var_explained:.1%} of variance")
 
-# Normalise PCA output to [-π, π] for AngleEmbedding
-def normalise_for_angle(X):
+# Normalise PCA output to [-π, π] for AngleEmbedding.
+# FIX (review item #5): fit min/max on TRAIN data only, then apply the same
+# affine transform to val/test. Fitting per-split (as before) leaks
+# distributional info from test into its own scaling and makes train/test
+# not directly comparable. This is the standard "fit on train, transform
+# everything" pattern already used for StandardScaler/PCA above.
+def fit_angle_scaler(X):
     X_min=X.min(0); X_max=X.max(0)
     X_range=np.where(X_max-X_min<1e-8, 1., X_max-X_min)
+    return X_min, X_range
+
+def apply_angle_scaler(X, X_min, X_range):
     return (X-X_min)/X_range*2*np.pi - np.pi
 
-X_tr_angle=normalise_for_angle(X_tr_pca)
-X_te_angle=normalise_for_angle(X_te_pca)
+_angle_min, _angle_range = fit_angle_scaler(X_tr_pca)
+X_tr_angle = apply_angle_scaler(X_tr_pca, _angle_min, _angle_range)
+X_te_angle = apply_angle_scaler(X_te_pca, _angle_min, _angle_range)
+# Note: test-set points can fall slightly outside [-π,π] if their PCA
+# values exceed the train-set range — this is expected and fine for
+# AngleEmbedding (angles just wrap), and is the honest way to evaluate
+# generalisation instead of quietly rescaling test to fit exactly.
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPROACH 1 — VQC (Variational Quantum Classifier)
@@ -258,17 +296,29 @@ def vqc_circuit(inputs, weights):
     qml.StronglyEntanglingLayers(weights, wires=range(N_QUBITS))
     return qml.expval(qml.PauliZ(0))
 
-VQC_BATCH_SIZE = 64  # matches the mini-batch size already used for QTL training below
+VQC_BATCH_SIZE = 64
 
-def train_binary_vqc(X_pos, X_neg, n_epochs=30, lr=0.05, batch_size=VQC_BATCH_SIZE):
+def train_binary_vqc(X_pos, X_neg, X_val_pos, X_val_neg, n_epochs=8,
+                      lr=0.05, batch_size=VQC_BATCH_SIZE, patience=3, seed=0):
     """Train one binary VQC (positive class vs all others).
 
-    Uses stochastic mini-batches (same pattern as the QTL training loop
-    later in this file) instead of evaluating the full balanced set every
-    epoch. Adam is designed for noisy mini-batch gradients, so convergence
-    behaviour is the same in expectation while each epoch is far cheaper.
+    FIX (review items #1, #4, #13): the previous version drew exactly ONE
+    64-sample batch per "epoch" and took one optimizer step on it — so
+    n_epochs=25 meant 25 total gradient updates, not 25 passes over the
+    data. That is a genuinely under-trained model, not evidence VQC can't
+    learn this task.
+
+    This version:
+      - iterates over ALL mini-batches of the training set each epoch
+        (true epochs), giving many more optimizer steps for the same
+        n_epochs;
+      - evaluates hinge loss on a held-out validation split each epoch;
+      - keeps the best-validation-loss weights (early stopping) instead
+        of just returning whatever the last epoch produced;
+      - seeds numpy per-classifier so results are reproducible given the
+        same seed.
     """
-    # Balance classes
+    np.random.seed(seed)
     n_min = min(len(X_pos), len(X_neg))
     X_pos = X_pos[:n_min]; X_neg = X_neg[:n_min]
     X_bin = np.vstack([X_pos, X_neg]).astype(np.float64)
@@ -276,39 +326,119 @@ def train_binary_vqc(X_pos, X_neg, n_epochs=30, lr=0.05, batch_size=VQC_BATCH_SI
     n_total = len(X_bin)
     bs = min(batch_size, n_total)
 
-    # Initialise weights
+    n_val_min = min(len(X_val_pos), len(X_val_neg))
+    X_val = np.vstack([X_val_pos[:n_val_min], X_val_neg[:n_val_min]]).astype(np.float64)
+    y_val = np.array([1.]*n_val_min + [-1.]*n_val_min)
+
     weights = 0.01 * np.random.randn(N_LAYERS, N_QUBITS, 3)
     opt     = qml.AdamOptimizer(lr)
 
+    def hinge_loss(w, X, y):
+        preds = pnp.stack([vqc_circuit(x, w) for x in X])
+        return float(pnp.mean(pnp.maximum(0, 1 - y * preds)))
+
+    best_val = np.inf
+    best_weights = weights
+    epochs_no_improve = 0
+
     for epoch in range(n_epochs):
-        batch_idx = np.random.choice(n_total, bs, replace=False)
-        Xb, yb = X_bin[batch_idx], y_bin[batch_idx]
+        perm = np.random.permutation(n_total)
+        n_batches = int(np.ceil(n_total / bs))
+        epoch_losses = []
+        for b in range(n_batches):
+            batch_idx = perm[b*bs:(b+1)*bs]
+            if len(batch_idx) == 0:
+                continue
+            Xb, yb = X_bin[batch_idx], y_bin[batch_idx]
 
-        def cost(w):
-            preds = pnp.stack([vqc_circuit(x, w) for x in Xb])
-            # Hinge-like loss
-            return pnp.mean(pnp.maximum(0, 1 - yb * preds))
+            def cost(w, Xb=Xb, yb=yb):
+                preds = pnp.stack([vqc_circuit(x, w) for x in Xb])
+                return pnp.mean(pnp.maximum(0, 1 - yb * preds))
 
-        weights, c = opt.step_and_cost(cost, weights)
-        if (epoch+1) % 10 == 0:
-            print(f"    epoch {epoch+1}/{n_epochs}  loss={c:.4f}", end='\r')
+            weights, c = opt.step_and_cost(cost, weights)
+            epoch_losses.append(float(c))
 
-    return weights
+        train_loss = float(np.mean(epoch_losses))
+        val_loss = hinge_loss(weights, X_val, y_val) if n_val_min > 0 else train_loss
 
-# Train 11 binary VQC classifiers (one per class)
-# NOTE: Training all 11 fully is very slow on CPU.
-# We train on a stratified subsample for speed.
-print("\n  Subsampling for QML speed (1000 train, 500 test per class)...")
-SUBSAMPLE_TRAIN = 1000
-SUBSAMPLE_TEST  = 500
+        if val_loss < best_val - 1e-4:
+            best_val = val_loss
+            best_weights = weights
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
 
-np.random.seed(42)
-idx_tr = np.random.choice(len(X_tr_angle), min(SUBSAMPLE_TRAIN*n_cls, len(X_tr_angle)), replace=False)
-idx_te = np.random.choice(len(X_te_angle), min(SUBSAMPLE_TEST*n_cls,  len(X_te_angle)), replace=False)
+        print(f"    epoch {epoch+1}/{n_epochs}  train_loss={train_loss:.4f}  "
+              f"val_loss={val_loss:.4f}  ({n_batches} batches/epoch)"
+              + ("  *best*" if epochs_no_improve==0 else ""))
 
-X_tr_q = X_tr_angle[idx_tr]; y_tr_q = y_tr[idx_tr]
-X_te_q = X_te_angle[idx_te]; y_te_q = y_te[idx_te]
-print(f"  VQC train: {len(X_tr_q):,} | VQC test: {len(X_te_q):,}")
+        if epochs_no_improve >= patience:
+            print(f"    early stop at epoch {epoch+1} (no val improvement for {patience} epochs)")
+            break
+
+    return best_weights
+
+# ── STRATIFIED TRAIN/VAL/TEST SUBSAMPLING FOR VQC ───────────────────────────
+# FIX (review item #3): the previous version drew ONE global random
+# subsample from all training windows, then re-used it as-is for every
+# OvR classifier. With 11 imbalanced classes, a global random draw can
+# easily under-represent some classes long before the per-classifier
+# positive/negative split happens. This draws SUBSAMPLE_TRAIN examples
+# PER CLASS (stratified), so every OvR classifier sees a comparable,
+# well-balanced pool for its class.
+# FIX (review item #4): also carves out a validation split from the
+# training subjects/windows (not from the held-out test subject) so
+# early stopping never touches test data.
+print("\n  Building stratified per-class train/val subsamples for QML...")
+SUBSAMPLE_TRAIN = 1000   # per class, for the training pool
+SUBSAMPLE_VAL   = 200    # per class, held out from train subjects for early stopping
+SUBSAMPLE_TEST  = 500    # per class, from the held-out test subject only
+
+RANDOM_SEED = 42
+# For a research-quality result, wrap this entire script's VQC training in
+# a loop over e.g. RANDOM_SEED in [42,43,44,45,46], collect vqc_acc/bal/f1
+# each run, and report mean±std — single-seed numbers should be described
+# as a point estimate, not the final claim, per review item #13.
+np.random.seed(RANDOM_SEED)
+
+def stratified_indices(y, per_class_n, rng):
+    idx = []
+    for cls in range(n_cls):
+        cls_idx = np.where(y==cls)[0]
+        rng.shuffle(cls_idx)
+        idx.extend(cls_idx[:min(per_class_n, len(cls_idx))].tolist())
+    return np.array(idx)
+
+rng = np.random.RandomState(RANDOM_SEED)
+
+# Split TRAIN SUBJECTS' windows into a train pool and a validation pool
+# (validation must never touch the held-out TEST_SUBJECT).
+train_pool_idx = stratified_indices(y_tr, SUBSAMPLE_TRAIN + SUBSAMPLE_VAL, rng)
+X_pool = X_tr_angle[train_pool_idx]; y_pool = y_tr[train_pool_idx]
+
+# For each class, first SUBSAMPLE_TRAIN examples -> train, rest -> val
+tr_final_idx, val_idx = [], []
+for cls in range(n_cls):
+    cls_pos = np.where(y_pool==cls)[0]
+    tr_final_idx.extend(cls_pos[:SUBSAMPLE_TRAIN].tolist())
+    val_idx.extend(cls_pos[SUBSAMPLE_TRAIN:SUBSAMPLE_TRAIN+SUBSAMPLE_VAL].tolist())
+
+X_tr_q  = X_pool[tr_final_idx]; y_tr_q  = y_pool[tr_final_idx]
+X_val_q = X_pool[val_idx];      y_val_q = y_pool[val_idx]
+
+if len(X_val_q) == 0:
+    print("  ⚠ WARNING: validation pool is empty (not enough per-class training")
+    print("    windows to carve out SUBSAMPLE_VAL on top of SUBSAMPLE_TRAIN).")
+    print("    Early stopping will fall back to monitoring train loss instead")
+    print("    of a true held-out validation loss — reduce SUBSAMPLE_TRAIN/")
+    print("    SUBSAMPLE_VAL or provide more data per class to fix this properly.")
+
+# Test subsample comes only from the held-out TEST_SUBJECT windows (X_te_angle/y_te)
+test_idx = stratified_indices(y_te, SUBSAMPLE_TEST, rng)
+X_te_q = X_te_angle[test_idx]; y_te_q = y_te[test_idx]
+
+print(f"  VQC train: {len(X_tr_q):,} | VQC val: {len(X_val_q):,} | VQC test: {len(X_te_q):,}")
+print(f"  (test subsample drawn only from held-out subject {TEST_SUBJECT})")
 
 vqc_weights = {}
 start = time.time()
@@ -317,7 +447,19 @@ for cls_idx in range(n_cls):
     print(f"\n  Training VQC {cls_idx+1}/{n_cls}: {act}")
     X_pos = X_tr_q[y_tr_q==cls_idx]
     X_neg = X_tr_q[y_tr_q!=cls_idx]
-    vqc_weights[cls_idx] = train_binary_vqc(X_pos, X_neg, n_epochs=25, lr=0.03)
+    X_val_pos = X_val_q[y_val_q==cls_idx]
+    X_val_neg = X_val_q[y_val_q!=cls_idx]
+    # n_epochs here means true passes over the (mini-batched) training set,
+    # not single optimizer steps — see docstring above. 8 epochs over a
+    # ~2000-sample balanced set with batch=64 is ~30 optimizer steps/epoch,
+    # i.e. up to ~240 steps total per classifier before early stopping,
+    # roughly an order of magnitude more learning signal than the original
+    # 25-single-batch-update version, while still finishing in reasonable
+    # time on CPU. Increase n_epochs / patience further if time allows.
+    vqc_weights[cls_idx] = train_binary_vqc(
+        X_pos, X_neg, X_val_pos, X_val_neg,
+        n_epochs=8, lr=0.03, patience=3, seed=RANDOM_SEED + cls_idx
+    )
 
 vqc_time = time.time() - start
 print(f"\n  VQC training time: {vqc_time/60:.1f} minutes")
@@ -338,11 +480,24 @@ y_prob_vqc = exp_scores / exp_scores.sum(1, keepdims=True)
 vqc_acc = accuracy_score(y_te_q, y_pred_vqc)
 vqc_bal = balanced_accuracy_score(y_te_q, y_pred_vqc)
 vqc_f1  = f1_score(y_te_q, y_pred_vqc, average='macro', zero_division=0)
-print(f"\n  VQC Results (on {SUBSAMPLE_TEST*n_cls} test windows):")
+print(f"\n  VQC Results (on {len(y_te_q)} test windows):")
 print(f"  Accuracy:     {vqc_acc:.1%}")
 print(f"  Balanced Acc: {vqc_bal:.1%}")
 print(f"  Macro F1:     {vqc_f1:.3f}")
 print(classification_report(y_te_q, y_pred_vqc, target_names=names, zero_division=0))
+
+# FIX (review item #2): flag rather than silently accept near/below-random
+# performance. With n_cls classes, random guessing ≈ 1/n_cls. Accuracy at
+# or below that is a signal the training setup needs further debugging
+# (learning rate, circuit expressivity, epochs, etc.) — not evidence about
+# VQC's ceiling on this task — so we surface it loudly instead of just
+# printing a number that looks like a finished result.
+_random_baseline = 1.0 / n_cls
+if vqc_acc <= _random_baseline * 1.15:
+    print(f"\n  ⚠ WARNING: VQC accuracy ({vqc_acc:.1%}) is at/near the random")
+    print(f"    baseline for {n_cls} classes (~{_random_baseline:.1%}). Do NOT report")
+    print(f"    this as a final result — investigate learning rate, epoch count,")
+    print(f"    circuit expressivity, or data scaling before drawing conclusions.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPROACH 2 — QKSVM (Quantum Kernel SVM)
@@ -361,14 +516,26 @@ def quantum_kernel_circuit(x1, x2):     # training/gradients happen through this
                                           # the default diff_method is fine and free here.
     """
     Quantum kernel: K(x1,x2) = |⟨φ(x1)|φ(x2)⟩|²
-    ZZ-inspired feature map:
-      1. Hadamard gates → superposition
-      2. Angle embed x1 → Rz rotations
-      3. Adjoint (reverse) angle embed x2
-      4. Measure overlap via all-zero state probability
+
+    FIX (review item #7): the docstring previously claimed a ZZ-style
+    feature map with Hadamards, but the implementation only did an
+    AngleEmbedding + its adjoint. This version implements what the
+    docstring actually describes:
+      1. Hadamard on every wire -> uniform superposition
+      2. RZ rotation per feature (angle-encoded) -> feature map |φ(x)>
+      3. Adjoint of the same map for x2, applied on top
+      4. Probability of measuring all-zeros = |<φ(x1)|φ(x2)>|^2
+    This is a real (if simplified) ZZ-style feature map: the initial
+    Hadamard layer means each RZ rotation now acts on a superposition
+    state rather than a computational basis state, which changes the
+    circuit's expressivity relative to the previous Hadamard-free version.
     """
+    for w in range(N_QUBITS):
+        qml.Hadamard(wires=w)
     qml.AngleEmbedding(x1, wires=range(N_QUBITS), rotation='Z')
     qml.adjoint(qml.AngleEmbedding)(x2, wires=range(N_QUBITS), rotation='Z')
+    for w in range(N_QUBITS):
+        qml.Hadamard(wires=w)
     return qml.probs(wires=range(N_QUBITS))
 
 def compute_kernel_matrix(X1, X2, symmetric=False):
@@ -397,18 +564,31 @@ def compute_kernel_matrix(X1, X2, symmetric=False):
     return K
 
 # Use smaller subsample for kernel (O(n²) complexity)
-KERNEL_N = 200   # per class
+# FIX (review item #6, CRITICAL): the previous version built X_ktr/y_ktr
+# from X_te_angle/y_te_q — i.e. it trained the QKSVM on windows from the
+# held-out TEST_SUBJECT, then evaluated on more windows from that same
+# subject. That's direct test-set leakage: the "test" accuracy included
+# information the model was trained on. Training data now comes from
+# X_tr_angle/y_tr (train subjects only, disjoint from TEST_SUBJECT);
+# X_kte/y_kte for final evaluation still comes only from X_te_angle/y_te
+# (the held-out subject), so training and evaluation subjects are fully
+# disjoint, matching the same held-out-subject protocol used for VQC.
+KERNEL_N = 200   # per class, from training subjects
+rng_k = np.random.RandomState(RANDOM_SEED)
 idx_ktr  = []
 idx_kte  = []
 for cls in range(n_cls):
-    cls_idx_tr = np.where(y_tr_q==cls)[0]
-    cls_idx_te = np.where(y_te_q==cls)[0]
+    cls_idx_tr = np.where(y_tr==cls)[0]
+    cls_idx_te = np.where(y_te==cls)[0]
+    rng_k.shuffle(cls_idx_tr); rng_k.shuffle(cls_idx_te)
     idx_ktr.extend(cls_idx_tr[:min(KERNEL_N//n_cls, len(cls_idx_tr))].tolist())
     idx_kte.extend(cls_idx_te[:min(50,             len(cls_idx_te))].tolist())
 
-X_ktr=X_te_angle[idx_ktr]; y_ktr=y_te_q[idx_ktr]  # using test angle features
-X_kte=X_te_angle[idx_kte]; y_kte=y_te_q[idx_kte]
+X_ktr=X_tr_angle[idx_ktr]; y_ktr=y_tr[idx_ktr]   # training-subject windows only
+X_kte=X_te_angle[idx_kte]; y_kte=y_te[idx_kte]   # held-out TEST_SUBJECT windows only
 print(f"\n  Computing quantum kernel ({len(X_ktr)}×{len(X_ktr)} train matrix)...")
+print(f"  Train kernel data: {len(X_ktr)} windows from TRAINING subjects (not {TEST_SUBJECT})")
+print(f"  Test  kernel data: {len(X_kte)} windows from held-out subject {TEST_SUBJECT}")
 start=time.time()
 K_train=compute_kernel_matrix(X_ktr, X_ktr, symmetric=True)
 K_test =compute_kernel_matrix(X_kte, X_ktr)
@@ -423,10 +603,14 @@ y_prob_qk=qksvm.predict_proba(K_test)
 qk_acc=accuracy_score(y_kte,y_pred_qk)
 qk_bal=balanced_accuracy_score(y_kte,y_pred_qk)
 qk_f1 =f1_score(y_kte,y_pred_qk,average='macro',zero_division=0)
-print(f"\n  QKSVM Results (on {len(X_kte)} test windows):")
+print(f"\n  QKSVM Results (on {len(X_kte)} test windows, held-out subject {TEST_SUBJECT}):")
 print(f"  Accuracy:     {qk_acc:.1%}")
 print(f"  Balanced Acc: {qk_bal:.1%}")
 print(f"  Macro F1:     {qk_f1:.3f}")
+print(f"  NOTE: evaluated under computational subsampling — train kernel built")
+print(f"  from {len(X_ktr)} training-subject windows (O(n²) circuit cost); this must")
+print(f"  be disclosed alongside the number in any write-up, not presented as")
+print(f"  equivalent to a full-dataset evaluation.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # APPROACH 3 — Quantum Transfer Learning (QTL)
@@ -473,12 +657,19 @@ def norm_amplitude(X):
     norms=np.linalg.norm(X,axis=1,keepdims=True)
     return X/np.where(norms<1e-10,1.,norms)
 
-X_tr_amp = norm_amplitude(X_tr_pca[:SUBSAMPLE_TRAIN])
-X_te_amp = norm_amplitude(X_te_pca[:SUBSAMPLE_TEST])
-y_tr_amp = y_tr[:SUBSAMPLE_TRAIN]
-y_te_amp = y_te[:SUBSAMPLE_TEST]
+# FIX (review item #9): use the same stratified train/test subsamples as
+# VQC/QKSVM (X_tr_q/y_tr_q from training subjects, X_te_q/y_te_q from the
+# held-out subject) instead of an arbitrary un-stratified `[:SUBSAMPLE_TRAIN]`
+# slice of X_tr_pca. This keeps QTL on the same held-out-subject protocol
+# as the other two approaches (review item #8) and gives it more than the
+# previous 200/100 samples to work with.
+X_tr_amp = norm_amplitude(X_tr_q)
+X_te_amp = norm_amplitude(X_te_q)
+y_tr_amp = y_tr_q
+y_te_amp = y_te_q
 
-print(f"\n  Training QTL ({len(X_tr_amp)} samples)...")
+print(f"\n  Training QTL ({len(X_tr_amp)} train / {len(X_te_amp)} test samples,")
+print(f"  same held-out-subject split used for VQC/QKSVM)")
 qtl_weights = 0.01*np.random.randn(N_LAYERS, N_QTL_QUBITS, 3)
 opt_qtl = qml.AdamOptimizer(0.05)
 
@@ -490,38 +681,81 @@ def get_qtl_features(X, weights):
         feats.append([float(o) for o in out])
     return np.array(feats)
 
-# One pass of weight optimisation
-for epoch in range(15):
-    batch = np.random.choice(len(X_tr_amp), 64, replace=False)
-    Xb,yb = X_tr_amp[batch],y_tr_amp[batch]
-    def cost_qtl(w):
-        qfeats=get_qtl_features(Xb[:16],w)  # small batch for speed
-        # Supervised signal: correlation with one-hot
-        losses=[]
-        for i,yy in enumerate(yb[:16]):
-            target=np.zeros(N_QTL_QUBITS); target[yy%N_QTL_QUBITS]=1.
-            losses.append(np.mean((qfeats[i]-target)**2))
-        return np.mean(losses)
-    qtl_weights,c=opt_qtl.step_and_cost(cost_qtl,qtl_weights)
-    if (epoch+1)%5==0: print(f"    epoch {epoch+1}/15  loss={c:.4f}")
+# FIX (review item #10, CRITICAL): the previous objective mapped each of
+# the 11 class labels to a 4-dim one-hot target via `class % 4`, meaning
+# classes {0,4,8}, {1,5,9}, {2,6,10}, {3,7} were all pushed toward the
+# SAME target vector. The quantum layer was therefore never trained to
+# distinguish those classes at all — its "task" was a spurious 4-way
+# problem, not the real 11-way problem.
+#
+# Fix: train the quantum layer with a proper contrastive/metric-learning
+# objective that IS well-defined for an 11-class problem mapped to a
+# lower-dimensional embedding: pull same-class embeddings together and
+# push different-class embeddings apart (a standard approach for using a
+# quantum circuit as a *feature extractor* ahead of a classical
+# classifier, which is what this circuit is actually used for below).
+# This makes the quantum layer's training signal consistent with what
+# the downstream classical SVM will be asked to do (draw boundaries
+# between all 11 classes in the resulting embedding space), instead of
+# optimizing an unrelated 4-way objective.
+MARGIN = 1.0
 
-# Extract quantum features for classification
+def cost_qtl_contrastive(w, Xb, yb):
+    qfeats = pnp.stack([qtl_circuit_v2(x[:2**N_QTL_QUBITS], w) for x in Xb])
+    n = len(Xb)
+    losses = []
+    # All pairs within the mini-batch (small batch, so O(n^2) pairs is cheap)
+    for i in range(n):
+        for j in range(i+1, n):
+            dist = pnp.sum((qfeats[i]-qfeats[j])**2)
+            if yb[i] == yb[j]:
+                losses.append(dist)                                  # pull together
+            else:
+                losses.append(pnp.maximum(0., MARGIN - dist))        # push apart
+    return pnp.mean(pnp.stack(losses)) if losses else pnp.array(0.)
+
+# Training loop: proper multi-batch epochs (same fix as VQC, review #1)
+QTL_EPOCHS = 8
+QTL_BATCH  = 16   # kept small since the contrastive loss is O(batch^2) pairs
+n_qtl_train = len(X_tr_amp)
+for epoch in range(QTL_EPOCHS):
+    perm = np.random.permutation(n_qtl_train)
+    n_batches = int(np.ceil(n_qtl_train / QTL_BATCH))
+    epoch_losses = []
+    for b in range(n_batches):
+        batch = perm[b*QTL_BATCH:(b+1)*QTL_BATCH]
+        if len(batch) < 2:
+            continue
+        Xb, yb = X_tr_amp[batch], y_tr_amp[batch]
+        qtl_weights, c = opt_qtl.step_and_cost(
+            lambda w: cost_qtl_contrastive(w, Xb, yb), qtl_weights)
+        epoch_losses.append(float(c))
+    print(f"    epoch {epoch+1}/{QTL_EPOCHS}  loss={np.mean(epoch_losses):.4f}  "
+          f"({n_batches} batches/epoch)")
+
+# Extract quantum features for classification.
+# The downstream classifier still does genuine 11-class classification
+# (SVC below, unchanged) — only the quantum layer's own training
+# objective was broken and is what item #10 fixed.
 print("  Extracting quantum features...")
-qtr_feats=get_qtl_features(X_tr_amp[:200], qtl_weights)
-qte_feats=get_qtl_features(X_te_amp[:100], qtl_weights)
+qtr_feats=get_qtl_features(X_tr_amp, qtl_weights)
+qte_feats=get_qtl_features(X_te_amp, qtl_weights)
 
 qtl_clf=SVC(kernel='rbf',C=10.,probability=True)
-qtl_clf.fit(qtr_feats, y_tr_amp[:200])
+qtl_clf.fit(qtr_feats, y_tr_amp)
 y_pred_qtl=qtl_clf.predict(qte_feats)
 y_prob_qtl=qtl_clf.predict_proba(qte_feats)
 
-qtl_acc=accuracy_score(y_te_amp[:100],y_pred_qtl)
-qtl_bal=balanced_accuracy_score(y_te_amp[:100],y_pred_qtl)
-qtl_f1 =f1_score(y_te_amp[:100],y_pred_qtl,average='macro',zero_division=0)
-print(f"\n  QTL Results (on {len(qte_feats)} test windows):")
+qtl_acc=accuracy_score(y_te_amp,y_pred_qtl)
+qtl_bal=balanced_accuracy_score(y_te_amp,y_pred_qtl)
+qtl_f1 =f1_score(y_te_amp,y_pred_qtl,average='macro',zero_division=0)
+print(f"\n  QTL Results (on {len(qte_feats)} test windows, held-out subject {TEST_SUBJECT}):")
 print(f"  Accuracy:     {qtl_acc:.1%}")
 print(f"  Balanced Acc: {qtl_bal:.1%}")
 print(f"  Macro F1:     {qtl_f1:.3f}")
+print(f"  NOTE: {N_QTL_QUBITS}-dim quantum embedding is a strong information")
+print(f"  bottleneck for {n_cls} classes — treat as proof-of-concept, not a")
+print(f"  ceiling on QTL performance (review item #11).")
 
 # ── SAVE QML RESULTS ────────────────────────────────────────────────────────
 # Reuse the VQC test subsample (X_te_q / y_te_q) instead of re-running
@@ -552,17 +786,23 @@ np.save("pamap2_qml_proba.npy", y_prob_vqc_full)
 print(f"\n{'='*65}")
 print("QML COMPARISON SUMMARY")
 print(f"{'='*65}")
-print(f"{'Approach':<30} {'Acc':>8} {'Bal Acc':>10} {'F1':>8}")
+print(f"{'Approach':<30} {'Acc':>8} {'Bal Acc':>10} {'F1':>8}  {'N (train/test)'}")
 print(f"{'-'*58}")
-print(f"{'VQC (AngleEmbed)':<30} {vqc_acc:>7.1%} {vqc_bal:>9.1%} {vqc_f1:>7.3f}")
-print(f"{'QKSVM (Quantum Kernel)':<30} {qk_acc:>7.1%} {qk_bal:>9.1%} {qk_f1:>7.3f}")
-print(f"{'QTL (Transfer)':<30} {qtl_acc:>7.1%} {qtl_bal:>9.1%} {qtl_f1:>7.3f}")
+print(f"{'VQC (AngleEmbed)':<30} {vqc_acc:>7.1%} {vqc_bal:>9.1%} {vqc_f1:>7.3f}  {len(X_tr_q)}/{len(X_te_q)}")
+print(f"{'QKSVM (Quantum Kernel)':<30} {qk_acc:>7.1%} {qk_bal:>9.1%} {qk_f1:>7.3f}  {len(X_ktr)}/{len(X_kte)}")
+print(f"{'QTL (Transfer)':<30} {qtl_acc:>7.1%} {qtl_bal:>9.1%} {qtl_f1:>7.3f}  {len(X_tr_amp)}/{len(X_te_amp)}")
 print(f"{'-'*58}")
-print(f"{'Classical ML (reference)':<30} {'95.8%':>8} {'90.3%':>10} {'0.907':>8}")
-print(f"\nNote: QML tested on subsampled windows due to O(n²) complexity.")
-print(f"Full-dataset QML requires quantum hardware or HPC cluster.")
-print(f"\nKey finding: Classical ML outperforms QML on this dataset.")
-print(f"QML contribution: novel comparison for publication, future-proof.")
+print(f"{'Classical ML (reference)':<30} {'95.8%':>8} {'90.3%':>10} {'0.907':>8}  (full dataset)")
+print(f"\nAll three QML approaches use the SAME held-out test subject")
+print(f"({TEST_SUBJECT}) and stratified per-class subsampling from disjoint")
+print(f"training-subject / test-subject windows — see printed N (train/test)")
+print(f"above for exact sample sizes used by each method.")
+print(f"\nNote: QML tested on subsampled windows due to O(n²)/simulator")
+print(f"complexity relative to the classical ML reference's full dataset.")
+print(f"Full-dataset QML requires quantum hardware or an HPC cluster.")
+if vqc_acc <= (1.0/n_cls)*1.15:
+    print(f"\n⚠ VQC result is at/near random baseline for {n_cls} classes — see")
+    print(f"  warning above. Investigate before treating as a final comparison.")
 print(f"{'='*65}")
 print(f"\nSaved: pamap2_qml_results.csv  pamap2_qml_proba.npy")
 print(f"Run next: python pamap2_final_hybrid.py")
