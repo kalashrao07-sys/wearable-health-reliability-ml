@@ -115,11 +115,18 @@ if len(available) == 0:
 # Align all models to same test set length
 n_test = min(len(v) for v in available.values())
 for k in available: available[k] = available[k].iloc[:n_test].reset_index(drop=True)
-y_true_enc = available[list(available.keys())[0]]['y_true_enc'].values \
-    if 'y_true_enc' in available[list(available.keys())[0]].columns \
-    else le.transform([ACTIVITY_MAP[int(a)] if a in ACTIVITY_MAP.values()
-                       else list(ACTIVITY_MAP.values())[0]
-                       for a in available[list(available.keys())[0]]['true_activity']])
+first_df = available[list(available.keys())[0]]
+
+if 'y_true_enc' in first_df.columns:
+    y_true_enc = first_df['y_true_enc'].values
+else:
+    activity_to_enc = {
+        name: idx for idx, name in enumerate(ACTIVITY_MAP.values())
+    }
+    y_true_enc = np.array([
+        activity_to_enc[a]
+        for a in first_df['true_activity']
+    ])
 
 print(f"\nTest set: {n_test} windows | Models loaded: {len(available)}")
 
