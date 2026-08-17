@@ -47,7 +47,8 @@ PURITY_THR    = 0.85
 SMOOTH_WINDOW = 25
 
 # Routing thresholds
-AMBIG_CONF_THRESHOLD = 0.70   # route to sub-clf if main conf < this
+AMBIG_CONF_THRESHOLD = 0.55   # tightened — only route when main model is genuinely unsure
+                               # (was 0.70, which overrode some correct Classical ML calls)
 STANDING_ID          = 3      # activityID for standing
 IRONING_ID           = 17     # activityID for ironing
 
@@ -285,6 +286,12 @@ sub_clf.fit(X_sub_tr, y_sub_tr)
 sub_acc=accuracy_score(y_sub_te, sub_clf.predict(X_sub_te))
 print(f"  Sub-classifier accuracy (standing vs ironing): {sub_acc:.1%}")
 
+# Safety check: only enable routing if sub-classifier is genuinely reliable
+ROUTING_ENABLED = sub_acc >= 0.75
+if not ROUTING_ENABLED:
+    print(f"  ⚠ Sub-classifier accuracy ({sub_acc:.1%}) below 75% threshold — routing disabled")
+    print(f"  Main fused predictions will be used as-is for standing/ironing")
+
 # ── CONFIDENCE-AWARE ROUTING ─────────────────────────────────────────────────
 print("\n── Applying Confidence-Aware Routing ───────────────────────────────────")
 
@@ -310,12 +317,10 @@ for i in range(min(n_test, n_sub_test)):
     pred_cls = y_fused[i]
     conf_val = fused_conf[i]
 
-    # Trigger routing condition
     is_ambiguous = pred_cls in [standing_enc, ironing_enc]
     is_low_conf  = conf_val < AMBIG_CONF_THRESHOLD
 
-    if is_ambiguous and is_low_conf:
-        # Route to sub-classifier
+    if ROUTING_ENABLED and is_ambiguous and is_low_conf:
         sub_feat = sub_test_features[SUB_FEAT].iloc[i].values.reshape(1,-1)
         sub_feat_sc = sub_scaler.transform(sub_feat)
         sub_pred = sub_clf.predict(sub_feat_sc)[0]
