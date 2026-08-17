@@ -219,7 +219,7 @@ print(f"Meta-test shape:  {meta_test.shape}")
 # ── LEVEL-1 META-LEARNER ────────────────────────────────────────────────────
 print("\nTraining meta-learner (Logistic Regression)...")
 meta_clf = LogisticRegression(
-    C=1.0, max_iter=1000, multi_class='multinomial',
+    C=1.0, max_iter=1000, 
     solver='lbfgs', random_state=42, n_jobs=-1
 )
 meta_clf.fit(meta_train, y_tr)
