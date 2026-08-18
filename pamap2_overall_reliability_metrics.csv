@@ -1,0 +1,2 @@
+accuracy,balanced_accuracy,precision_macro,recall_macro,f1_macro,mean_confidence,ece,spearman_rho,spearman_p,n_windows,validate_subjects
+0.9055,0.9022,0.9071,0.9022,0.904,0.8104,0.0952,0.4391,0.0,18609,"[103, 105, 106, 108]"
