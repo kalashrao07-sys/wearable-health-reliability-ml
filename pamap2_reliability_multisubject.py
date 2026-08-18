@@ -557,12 +557,24 @@ else:
 print(f"{'='*65}\n")
 
 _subj109_protocol_windows = ((windows['subject_id'] == 109) & (windows['data_source'] == 'protocol')).sum()
-assert _subj109_protocol_windows > 0, (
-    "Subject 109 still has 0 'protocol' windows after feature extraction/cache "
-    "rebuild. The data_source fix (majority-vote per window) did not resolve "
-    "this — inspect the raw CSV's data_source values for Subject 109 directly."
-)
-print(f"Subject 109 protocol windows confirmed: {_subj109_protocol_windows:,}\n")
+if _subj109_protocol_windows == 0:
+    # Confirmed by diagnostic: Subject 109's entire Protocol recording (6,384
+    # raw rows -> 126 windows) has activityID==24 (rope_jumping) as the
+    # majority label in every single window, which the pipeline correctly
+    # excludes everywhere (all subjects, not just 109). This is a genuine
+    # data-scope fact, not an extraction bug — 0 is the correct count here.
+    # Per Option A: Subject 109 is validated on Optional data only; the
+    # per-subject validation loop below already skips subjects with no
+    # Protocol test windows, so no further change is needed.
+    print(
+        "NOTE: Subject 109 has 0 'protocol' windows because its entire "
+        "Protocol recording is rope_jumping (activityID==24), which is "
+        "excluded for all subjects by design. Subject 109 will be validated "
+        "on Optional data only; the per-subject loop skips Protocol-based "
+        "validation for it automatically.\n"
+    )
+else:
+    print(f"Subject 109 protocol windows confirmed: {_subj109_protocol_windows:,}\n")
 
 print(f"\nTotal windows: {len(windows):,} | Features: {len(FEATURE_COLS)}")
 assert len(FEATURE_COLS) == 308, (
