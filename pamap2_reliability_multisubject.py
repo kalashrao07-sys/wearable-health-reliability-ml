@@ -173,6 +173,7 @@ def extract_window_features(data: pd.DataFrame, forced_data_source: str = None) 
     freqs = np.fft.rfftfreq(WINDOW_SIZE, d=1.0 / SAMPLING_FREQ)
     records = []
     discarded_impure = 0
+    discarded_activity24 = 0
 
     for start in range(0, len(data) - WINDOW_SIZE, STEP_SIZE):
         window = data.iloc[start: start + WINDOW_SIZE]
@@ -181,6 +182,7 @@ def extract_window_features(data: pd.DataFrame, forced_data_source: str = None) 
         subject = window['subject_id'].iloc[0]
 
         if label == 24:
+            discarded_activity24 += 1
             continue
         if purity < PURITY_THRESHOLD:
             discarded_impure += 1
@@ -287,6 +289,8 @@ def extract_window_features(data: pd.DataFrame, forced_data_source: str = None) 
 
     if discarded_impure > 0:
         print(f"    Discarded {discarded_impure:,} impure windows (purity < {PURITY_THRESHOLD:.0%})")
+    if discarded_activity24 > 0:
+        print(f"    Discarded {discarded_activity24:,} windows with majority activityID==24 (rope_jumping)")
     return pd.DataFrame(records)
 
 
