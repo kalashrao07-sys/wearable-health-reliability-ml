@@ -816,13 +816,26 @@ if not pieces:
 final_combined = pd.concat(pieces, ignore_index=True)
 
 # ── SUBJECT COMPLETENESS CHECK ─────────────────────────────────────────────
-expected_subjects = set(ALL_NINE_SUBJECTS)
+# Under Option A, Subject 109 is out of scope for this Protocol-based test
+# set: its entire Protocol recording is rope_jumping (activityID==24), which
+# every subject's Protocol data is filtered on identically, and rope_jumping
+# is excluded everywhere by design. The validation loop above only ever
+# builds `test` from data_source=='protocol', so Subject 109 structurally
+# cannot contribute a Protocol-tested row here — that is expected, not a
+# gap to be filled by re-running anything. Completeness is therefore checked
+# against the 8 subjects that do have Protocol test data.
+expected_subjects = set(ALL_NINE_SUBJECTS) - {109}
 present_subjects_set = set(final_combined['subject'].unique().tolist())
 present_subjects = sorted(present_subjects_set)
 
 if present_subjects_set == expected_subjects:
-    print(f"\nFINAL VALIDATION: 9 subjects confirmed")
+    print(f"\nFINAL VALIDATION: {len(expected_subjects)} Protocol-tested subjects confirmed")
     print(f"{', '.join(str(s) for s in present_subjects)}")
+    print(
+        "Subject 109 is intentionally excluded from this Protocol-based test "
+        "set (Option A: its Protocol recording is 100% rope_jumping, which "
+        "is excluded for all subjects)."
+    )
 else:
     missing_subjects = sorted(expected_subjects - present_subjects_set)
     extra_subjects = sorted(present_subjects_set - expected_subjects)
@@ -831,7 +844,7 @@ else:
     if missing_subjects:
         print(f"  Missing:  {missing_subjects}")
     if extra_subjects:
-        print(f"  Unexpected (not in the 9-subject list): {extra_subjects}")
+        print(f"  Unexpected (not in the 8-subject Protocol-tested list): {extra_subjects}")
     raise SystemExit(
         "Stopping before generating final results — set(final_results['subject']) "
         f"!= expected_subjects ({sorted(expected_subjects)}). "
