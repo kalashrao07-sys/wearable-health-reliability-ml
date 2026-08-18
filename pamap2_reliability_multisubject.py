@@ -21,7 +21,11 @@ This script only measures whether confidence predicts correctness.
 
 ── INCREMENTAL / RESUMABLE WORKFLOW ────────────────────────────────────────
 Subjects 103, 105, 106, 108 have already been validated and their per-window
-results live in pamap2_multisubject_reliability.csv. This script:
+results live in pamap2_multisubject_reliability.csv. Subjects 101, 102, 104,
+107 have also already succeeded and are saved in
+pamap2_multisubject_reliability_remaining.csv. Only Subject 109 remains,
+currently blocked by a data_source mismatch investigated by the diagnostic
+block below (do not remove it until that's resolved). This script:
   1. Caches the complete 308-feature dataset (pamap2_reliability_features.pkl,
      a pickled DataFrame with all feature columns + activityID + subject_id +
      data_source) so feature extraction from the raw CSV and the inter-window
@@ -77,12 +81,14 @@ REMAINING_RESULTS_CSV = "pamap2_multisubject_reliability_remaining.csv"  # new 5
 FINAL_RESULTS_CSV     = "pamap2_multisubject_reliability_final.csv"      # combined 9-subject per-window data
 
 ALREADY_VALIDATED_SUBJECTS = [103, 105, 106, 108]
+ALREADY_VALIDATED_IN_REMAINING_RUN = [101, 102, 104, 107]  # already succeeded, saved in the "remaining" file
 ALL_NINE_SUBJECTS = [101, 102, 103, 104, 105, 106, 107, 108, 109]
 
-# Only the five remaining subjects are trained/validated in this run.
-# 103, 105, 106, 108 are NOT rerun — their results already exist in
-# pamap2_multisubject_reliability.csv and are picked up by the combine stage.
-VALIDATE_SUBJECTS = [101, 102, 104, 107, 109]
+# Only Subject 109 is trained/validated in this run. 101, 102, 104, 107 have
+# already succeeded and their results already exist in
+# pamap2_multisubject_reliability_remaining.csv — they are loaded and merged
+# back in below rather than retrained, and 103/105/106/108 are still not rerun.
+VALIDATE_SUBJECTS = [109]
 
 ACTIVITY_MAP = {
     1:'lying', 2:'sitting', 3:'standing', 4:'walking', 5:'running',
@@ -266,7 +272,8 @@ def build_feature_dataset():
     df = pd.read_csv(INPUT_FILE)
     print(f"  Shape: {df.shape}")
 
-    global SENSOR_COLS
+    global SENSOR_COLS, RAW_DF_FOR_DIAGNOSTICS
+    RAW_DF_FOR_DIAGNOSTICS = df  # kept only for the Subject 109 diagnostic below
     SENSOR_COLS = [c for c in df.columns
                    if c not in ['timestamp', 'activityID', 'subject_id',
                                  'activity_name', 'acc_magnitude', 'data_source',
@@ -308,6 +315,7 @@ def build_feature_dataset():
 
 
 SENSOR_COLS = None  # populated inside build_feature_dataset() on a cache miss
+RAW_DF_FOR_DIAGNOSTICS = None  # populated inside build_feature_dataset() on a cache miss
 
 if os.path.exists(FEATURE_CACHE_PKL):
     print("Loading cached 308-feature dataset...")
@@ -327,6 +335,33 @@ else:
     print(f"\nSaving feature cache ({len(windows):,} windows x {len(FEATURE_COLS)} features)...")
     windows.to_pickle(FEATURE_CACHE_PKL)
     print(f"  Saved: {FEATURE_CACHE_PKL}")
+
+# ── DIAGNOSTIC: Subject 109 data_source mismatch investigation ─────────────
+# Requested check — do not remove until the Subject 109 Protocol-window
+# issue is confirmed fixed. Compares the raw CSV's data_source labels for
+# Subject 109 against what survived into the processed `windows` dataframe,
+# to find where Protocol rows stop being represented as 'protocol' windows.
+print(f"\n{'='*65}")
+print("DIAGNOSTIC — Subject 109 data_source (windows vs raw df)")
+print(f"{'='*65}")
+
+print("\nwindows[windows['subject_id'] == 109]['data_source'].value_counts():")
+if 'subject_id' in windows.columns and 'data_source' in windows.columns:
+    print(windows[windows['subject_id'] == 109]['data_source'].value_counts(dropna=False))
+else:
+    print("  (subject_id or data_source column missing from windows — cannot check)")
+
+print("\ndf[df['subject_id'] == 109]['data_source'].value_counts():")
+if RAW_DF_FOR_DIAGNOSTICS is not None:
+    _diag_df = RAW_DF_FOR_DIAGNOSTICS
+else:
+    # Cache hit path never loaded df — load it just for this diagnostic.
+    _diag_df = pd.read_csv(INPUT_FILE)
+if 'subject_id' in _diag_df.columns and 'data_source' in _diag_df.columns:
+    print(_diag_df[_diag_df['subject_id'] == 109]['data_source'].value_counts(dropna=False))
+else:
+    print("  (subject_id or data_source column missing from raw df — cannot check)")
+print(f"{'='*65}\n")
 
 print(f"\nTotal windows: {len(windows):,} | Features: {len(FEATURE_COLS)}")
 assert len(FEATURE_COLS) == 308, (
@@ -365,12 +400,14 @@ def build_voting_clf():
 
 
 # ── RUN SUBJECT-WISE VALIDATION WITH THE FINAL VOTING CLASSIFIER ──────────
-# Skip any subject already validated in pamap2_multisubject_reliability.csv —
-# defensive guard against accidentally rerunning 103/105/106/108.
-subjects_to_run = [s for s in VALIDATE_SUBJECTS if s not in ALREADY_VALIDATED_SUBJECTS]
-skipped_already_done = [s for s in VALIDATE_SUBJECTS if s in ALREADY_VALIDATED_SUBJECTS]
+# Skip any subject already validated — defensive guard against accidentally
+# rerunning 103/105/106/108 (in pamap2_multisubject_reliability.csv) or
+# 101/102/104/107 (already succeeded, saved in the "remaining" file).
+_skip_set = set(ALREADY_VALIDATED_SUBJECTS) | set(ALREADY_VALIDATED_IN_REMAINING_RUN)
+subjects_to_run = [s for s in VALIDATE_SUBJECTS if s not in _skip_set]
+skipped_already_done = [s for s in VALIDATE_SUBJECTS if s in _skip_set]
 if skipped_already_done:
-    print(f"\nSkipping subjects already validated (found in {EXISTING_RESULTS_CSV}): {skipped_already_done}")
+    print(f"\nSkipping subjects already validated: {skipped_already_done}")
 
 all_results = []
 per_subject_summary = []
@@ -453,17 +490,46 @@ for val_sub in subjects_to_run:
     })
     all_results.append(df_result)
 
-# ── SAVE NEW SUBJECTS' RESULTS SEPARATELY — never touches the existing file ─
+# ── SAVE NEW SUBJECTS' RESULTS — merged with any already-saved results ─────
+# so this run (Subject 109 only) does not wipe out the results already saved
+# for 101/102/104/107 in a prior run.
+if os.path.exists(REMAINING_RESULTS_CSV):
+    prior_remaining_df = pd.read_csv(REMAINING_RESULTS_CSV)
+    prior_subjects_in_file = sorted(prior_remaining_df['subject'].unique().tolist())
+    print(f"\nFound existing {REMAINING_RESULTS_CSV} with subjects {prior_subjects_in_file} — "
+          "preserving these and merging in any newly run subjects.")
+else:
+    prior_remaining_df = pd.DataFrame()
+
 if all_results:
     new_results = pd.concat(all_results, ignore_index=True)
-    new_results.to_csv(REMAINING_RESULTS_CSV, index=False)
-    print(f"\nSaved new per-window results: {REMAINING_RESULTS_CSV} ({len(new_results):,} windows)")
+    # Drop any prior rows for subjects rerun in this pass (shouldn't happen
+    # given the skip guard above, but keeps the merge safe either way), then
+    # concatenate — never deduplicating legitimate windows across subjects.
+    if not prior_remaining_df.empty:
+        newly_run_subjects = set(new_results['subject'].unique().tolist())
+        prior_remaining_df = prior_remaining_df[~prior_remaining_df['subject'].isin(newly_run_subjects)]
+    merged_remaining = pd.concat([prior_remaining_df, new_results], ignore_index=True)
+else:
+    merged_remaining = prior_remaining_df
+
+if not merged_remaining.empty:
+    merged_remaining.to_csv(REMAINING_RESULTS_CSV, index=False)
+    print(f"\nSaved per-window results: {REMAINING_RESULTS_CSV} "
+          f"({len(merged_remaining):,} windows, subjects {sorted(merged_remaining['subject'].unique())})")
 
     per_subject_new_df = pd.DataFrame(per_subject_summary)
-    per_subject_new_df.to_csv("pamap2_per_subject_summary_remaining.csv", index=False)
-    print(f"Saved: pamap2_per_subject_summary_remaining.csv")
+    if os.path.exists("pamap2_per_subject_summary_remaining.csv") and not per_subject_new_df.empty:
+        prior_per_subj = pd.read_csv("pamap2_per_subject_summary_remaining.csv")
+        prior_per_subj = prior_per_subj[~prior_per_subj['subject'].isin(per_subject_new_df['subject'])]
+        per_subject_new_df = pd.concat([prior_per_subj, per_subject_new_df], ignore_index=True)
+    elif os.path.exists("pamap2_per_subject_summary_remaining.csv") and per_subject_new_df.empty:
+        per_subject_new_df = pd.read_csv("pamap2_per_subject_summary_remaining.csv")
+    if not per_subject_new_df.empty:
+        per_subject_new_df.to_csv("pamap2_per_subject_summary_remaining.csv", index=False)
+        print(f"Saved: pamap2_per_subject_summary_remaining.csv")
 else:
-    print("\nNo new subjects were validated this run (nothing in subjects_to_run).")
+    print("\nNo new or previously saved subjects found for the remaining-subjects file.")
 
 
 # ════════════════════════════════════════════════════════════════════════
