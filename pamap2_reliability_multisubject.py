@@ -23,9 +23,14 @@ This script only measures whether confidence predicts correctness.
 Subjects 103, 105, 106, 108 have already been validated and their per-window
 results live in pamap2_multisubject_reliability.csv. Subjects 101, 102, 104,
 107 have also already succeeded and are saved in
-pamap2_multisubject_reliability_remaining.csv. Only Subject 109 remains,
-currently blocked by a data_source mismatch investigated by the diagnostic
-block below (do not remove it until that's resolved). This script:
+pamap2_multisubject_reliability_remaining.csv. Only Subject 109 remains.
+Subject 109 previously showed 0 'protocol' windows after feature extraction
+even though the raw CSV has 6,384 Protocol rows for it — traced to
+extract_window_features() tagging each window's data_source from only the
+first row (.iloc[0]) instead of the window's majority source. Fixed to use
+.mode()[0], matching how the activity label itself is derived. The cache
+auto-detects and rebuilds itself if it still shows the old broken state.
+This script:
   1. Caches the complete 308-feature dataset (pamap2_reliability_features.pkl,
      a pickled DataFrame with all feature columns + activityID + subject_id +
      data_source) so feature extraction from the raw CSV and the inter-window
@@ -257,7 +262,17 @@ def extract_window_features(data: pd.DataFrame) -> pd.DataFrame:
 
         feat['activityID'] = label
         feat['subject_id'] = subject
-        feat['data_source'] = window['data_source'].iloc[0] if 'data_source' in window.columns else 'protocol'
+        # Use the majority data_source within the window (mirrors how the
+        # activity label itself is derived via mode()), rather than only the
+        # first row. A window's first row is not a reliable indicator when
+        # windows can straddle a Protocol/Optional boundary or when a
+        # subject's raw rows aren't strictly Protocol-then-Optional ordered —
+        # which is what caused Subject 109's Protocol windows to be silently
+        # mislabeled and made invisible to the Protocol-only validation filter.
+        if 'data_source' in window.columns:
+            feat['data_source'] = window['data_source'].mode()[0]
+        else:
+            feat['data_source'] = 'protocol'
         records.append(feat)
 
     if discarded_impure > 0:
@@ -317,11 +332,43 @@ def build_feature_dataset():
 SENSOR_COLS = None  # populated inside build_feature_dataset() on a cache miss
 RAW_DF_FOR_DIAGNOSTICS = None  # populated inside build_feature_dataset() on a cache miss
 
+def _cache_has_known_subject109_bug(cached_windows: pd.DataFrame) -> bool:
+    """Detects the specific stale-cache condition this fix addresses: a cache
+    built with the old .iloc[0] data_source logic has zero 'protocol' windows
+    for Subject 109 even though the raw CSV has Protocol rows for it."""
+    if 'subject_id' not in cached_windows.columns or 'data_source' not in cached_windows.columns:
+        return False
+    subj109 = cached_windows[cached_windows['subject_id'] == 109]
+    if len(subj109) == 0:
+        return False
+    return (subj109['data_source'] == 'protocol').sum() == 0
+
 if os.path.exists(FEATURE_CACHE_PKL):
     print("Loading cached 308-feature dataset...")
     windows = pd.read_pickle(FEATURE_CACHE_PKL)
-    FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
-    print(f"  Loaded {len(windows):,} windows | {len(FEATURE_COLS)} features from cache")
+
+    if _cache_has_known_subject109_bug(windows):
+        print(f"  Cache {FEATURE_CACHE_PKL} has 0 'protocol' windows for Subject 109 "
+              "despite Protocol rows existing in the raw CSV — this matches the known "
+              "data_source mislabeling bug (fixed to use majority-vote data_source "
+              "per window instead of the first row). Rebuilding the cache from "
+              f"{INPUT_FILE}...")
+        os.remove(FEATURE_CACHE_PKL)
+        print("Feature cache not found. Extracting features...")
+        windows = build_feature_dataset()
+
+        FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
+        assert len(FEATURE_COLS) == 308, (
+            f"Expected 308 features to match the final pipeline, got {len(FEATURE_COLS)}. "
+            "Check that this script's feature engineering hasn't drifted from pamap2_ml_model.py."
+        )
+
+        print(f"\nSaving feature cache ({len(windows):,} windows x {len(FEATURE_COLS)} features)...")
+        windows.to_pickle(FEATURE_CACHE_PKL)
+        print(f"  Saved: {FEATURE_CACHE_PKL}")
+    else:
+        FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
+        print(f"  Loaded {len(windows):,} windows | {len(FEATURE_COLS)} features from cache")
 else:
     print("Feature cache not found. Extracting features...")
     windows = build_feature_dataset()
@@ -362,6 +409,14 @@ if 'subject_id' in _diag_df.columns and 'data_source' in _diag_df.columns:
 else:
     print("  (subject_id or data_source column missing from raw df — cannot check)")
 print(f"{'='*65}\n")
+
+_subj109_protocol_windows = ((windows['subject_id'] == 109) & (windows['data_source'] == 'protocol')).sum()
+assert _subj109_protocol_windows > 0, (
+    "Subject 109 still has 0 'protocol' windows after feature extraction/cache "
+    "rebuild. The data_source fix (majority-vote per window) did not resolve "
+    "this — inspect the raw CSV's data_source values for Subject 109 directly."
+)
+print(f"Subject 109 protocol windows confirmed: {_subj109_protocol_windows:,}\n")
 
 print(f"\nTotal windows: {len(windows):,} | Features: {len(FEATURE_COLS)}")
 assert len(FEATURE_COLS) == 308, (
