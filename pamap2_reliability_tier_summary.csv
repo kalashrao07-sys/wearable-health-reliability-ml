@@ -1,0 +1,4 @@
+tier,windows,pct_total,accuracy,error_rate,mean_confidence
+GREEN,13333,0.7165,0.9942,0.0058,0.9243
+YELLOW,3556,0.1911,0.7922,0.2078,0.6027
+RED,1720,0.0924,0.4517,0.5483,0.3565
