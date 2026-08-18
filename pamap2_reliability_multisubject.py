@@ -157,8 +157,19 @@ def safe_corr(a, b):
     return float(np.corrcoef(a, b)[0, 1])
 
 
-def extract_window_features(data: pd.DataFrame) -> pd.DataFrame:
-    """Identical feature set/order to pamap2_ml_model.py — 308 features total."""
+def extract_window_features(data: pd.DataFrame, forced_data_source: str = None) -> pd.DataFrame:
+    """Identical feature set/order to pamap2_ml_model.py — 308 features total.
+
+    Windows the given dataframe continuously (100-sample windows, 50-step).
+    Callers are responsible for passing a single-source segment (all-Protocol
+    or all-Optional) so that no window straddles a Protocol/Optional boundary —
+    see extract_window_features_by_source() below, which does this per subject.
+
+    forced_data_source, when given, is written directly to every window's
+    data_source field instead of being inferred from the data — used because
+    the caller already knows the segment's source with certainty (it's the
+    segment it sliced), which is more reliable than any per-window inference.
+    """
     freqs = np.fft.rfftfreq(WINDOW_SIZE, d=1.0 / SAMPLING_FREQ)
     records = []
     discarded_impure = 0
@@ -262,14 +273,13 @@ def extract_window_features(data: pd.DataFrame) -> pd.DataFrame:
 
         feat['activityID'] = label
         feat['subject_id'] = subject
-        # Use the majority data_source within the window (mirrors how the
-        # activity label itself is derived via mode()), rather than only the
-        # first row. A window's first row is not a reliable indicator when
-        # windows can straddle a Protocol/Optional boundary or when a
-        # subject's raw rows aren't strictly Protocol-then-Optional ordered —
-        # which is what caused Subject 109's Protocol windows to be silently
-        # mislabeled and made invisible to the Protocol-only validation filter.
-        if 'data_source' in window.columns:
+        # forced_data_source (set by the caller, which already sliced this
+        # segment by source) is authoritative and used whenever given. This
+        # avoids inferring data_source from within-window majority vote,
+        # which is unnecessary once windows never straddle a source boundary.
+        if forced_data_source is not None:
+            feat['data_source'] = forced_data_source
+        elif 'data_source' in window.columns:
             feat['data_source'] = window['data_source'].mode()[0]
         else:
             feat['data_source'] = 'protocol'
@@ -278,6 +288,70 @@ def extract_window_features(data: pd.DataFrame) -> pd.DataFrame:
     if discarded_impure > 0:
         print(f"    Discarded {discarded_impure:,} impure windows (purity < {PURITY_THRESHOLD:.0%})")
     return pd.DataFrame(records)
+
+
+def extract_window_features_by_source(subj_df: pd.DataFrame) -> pd.DataFrame:
+    """Windows a single subject's data with Protocol and Optional segments
+    kept strictly separate, so no window ever straddles a data_source
+    boundary. This is what fixes Subject 109 (and protects every other
+    subject from the same failure mode, even where it happened not to zero
+    out a segment entirely): continuous windowing over the whole subject
+    dataframe let windows span from one source into the other, which could
+    corrupt the purity/majority-vote logic and — worst case, as with Subject
+    109 — leave a source with zero surviving windows even though its raw
+    rows exist in full.
+
+    Same 100-sample / 50-step windowing, same purity threshold, same activity
+    filtering, same 308 features — the only change is *what* gets windowed:
+    each source's contiguous rows independently, instead of the whole
+    subject continuously.
+
+    Additionally, if a source's rows are not contiguous in the raw file
+    (e.g. Protocol/Optional blocks interleave rather than being two clean
+    runs), each contiguous run of that source is windowed separately too —
+    otherwise concatenating non-adjacent rows into one segment would create
+    windows spanning an artificial time discontinuity.
+    """
+    if 'data_source' not in subj_df.columns:
+        # No data_source column at all — behave exactly as before (whole
+        # subject as one continuous segment, defaulting to 'protocol').
+        return extract_window_features(subj_df, forced_data_source=None)
+
+    def _contiguous_runs(mask: pd.Series):
+        """Yield (start, end) index ranges of contiguous True runs in mask."""
+        run_id = (mask != mask.shift()).cumsum()
+        for _, idx in subj_df[mask].groupby(run_id[mask]).groups.items():
+            yield idx
+
+    segment_frames = []
+    for source_value in ['protocol', 'optional']:
+        mask = subj_df['data_source'] == source_value
+        if not mask.any():
+            continue
+        for run_index in _contiguous_runs(mask):
+            run = subj_df.loc[run_index].reset_index(drop=True)
+            if len(run) < WINDOW_SIZE:
+                continue
+            segment_frames.append(
+                extract_window_features(run, forced_data_source=source_value)
+            )
+
+    # Any rows with a data_source value other than 'protocol'/'optional'
+    # (e.g. NaN) are windowed as their own contiguous-run segments too, so no
+    # raw row is silently dropped from consideration — data_source is
+    # inferred per-window for this leftover group only, same as the old
+    # fallback behavior.
+    other_mask = ~subj_df['data_source'].isin(['protocol', 'optional'])
+    if other_mask.any():
+        for run_index in _contiguous_runs(other_mask):
+            run = subj_df.loc[run_index].reset_index(drop=True)
+            if len(run) < WINDOW_SIZE:
+                continue
+            segment_frames.append(extract_window_features(run, forced_data_source=None))
+
+    if not segment_frames:
+        return pd.DataFrame()
+    return pd.concat(segment_frames, ignore_index=True)
 
 
 def build_feature_dataset():
@@ -296,12 +370,13 @@ def build_feature_dataset():
                                  'hand_temp', 'chest_temp', 'ankle_temp']]
     print(f"  Sensor columns used: {len(SENSOR_COLS)}")
 
-    print("\nExtracting features for all subjects (same 308-feature pipeline)...")
+    print("\nExtracting features for all subjects (same 308-feature pipeline, "
+          "Protocol/Optional segments windowed independently)...")
     all_windows = []
     for sid in df['subject_id'].unique():
         print(f"  Processing subject {sid}...")
         subj_df = df[df['subject_id'] == sid].reset_index(drop=True)
-        all_windows.append(extract_window_features(subj_df))
+        all_windows.append(extract_window_features_by_source(subj_df))
 
     windows_ = pd.concat(all_windows, ignore_index=True).dropna()
 
@@ -333,9 +408,13 @@ SENSOR_COLS = None  # populated inside build_feature_dataset() on a cache miss
 RAW_DF_FOR_DIAGNOSTICS = None  # populated inside build_feature_dataset() on a cache miss
 
 def _cache_has_known_subject109_bug(cached_windows: pd.DataFrame) -> bool:
-    """Detects the specific stale-cache condition this fix addresses: a cache
-    built with the old .iloc[0] data_source logic has zero 'protocol' windows
-    for Subject 109 even though the raw CSV has Protocol rows for it."""
+    """Detects a stale cache: zero 'protocol' windows for Subject 109 even
+    though the raw CSV has 6,384 Protocol rows for it. Older cache versions
+    hit this either via the .iloc[0]-based data_source bug, or via continuous
+    whole-subject windowing letting windows straddle the Protocol/Optional
+    boundary and corrupt purity for that segment. Both are fixed by
+    extract_window_features_by_source(), which windows each source's
+    contiguous runs independently."""
     if 'subject_id' not in cached_windows.columns or 'data_source' not in cached_windows.columns:
         return False
     subj109 = cached_windows[cached_windows['subject_id'] == 109]
