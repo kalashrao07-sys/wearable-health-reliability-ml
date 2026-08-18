@@ -376,7 +376,70 @@ def build_feature_dataset():
     for sid in df['subject_id'].unique():
         print(f"  Processing subject {sid}...")
         subj_df = df[df['subject_id'] == sid].reset_index(drop=True)
-        all_windows.append(extract_window_features_by_source(subj_df))
+        subj_windows = extract_window_features_by_source(subj_df)
+
+        # ── SUBJECT 109 DIAGNOSTIC (read-only; does not alter the pipeline) ──
+        if sid == 109 and 'data_source' in subj_df.columns:
+            print(f"\n  ── Subject 109 diagnostic ─────────────────────────────")
+            for source_value in ['protocol', 'optional']:
+                mask = subj_df['data_source'] == source_value
+                n_rows = int(mask.sum())
+
+                # 2. contiguous runs and their lengths
+                run_id = (mask != mask.shift()).cumsum()
+                run_lengths = [
+                    len(idx) for _, idx in subj_df[mask].groupby(run_id[mask]).groups.items()
+                ]
+                n_runs = len(run_lengths)
+                runs_ge_window = [l for l in run_lengths if l >= WINDOW_SIZE]
+
+                print(f"  [{source_value}]")
+                print(f"    1. Raw rows:                          {n_rows:,}")
+                print(f"    2. Contiguous runs:                   {n_runs}"
+                      f" (lengths: {sorted(run_lengths, reverse=True)[:10]}"
+                      f"{' ...' if n_runs > 10 else ''})")
+                print(f"       Runs >= WINDOW_SIZE({WINDOW_SIZE}):        {len(runs_ge_window)}")
+
+                # 3. windows generated (pre-dropna) for this source, using the
+                #    exact same per-run slicing the real pipeline uses
+                pre_dropna_frames = []
+                run_id_full = (mask != mask.shift()).cumsum()
+                for _, idx in subj_df[mask].groupby(run_id_full[mask]).groups.items():
+                    run = subj_df.loc[idx].reset_index(drop=True)
+                    if len(run) < WINDOW_SIZE:
+                        continue
+                    pre_dropna_frames.append(
+                        extract_window_features(run, forced_data_source=source_value)
+                    )
+                pre_dropna_df = (pd.concat(pre_dropna_frames, ignore_index=True)
+                                  if pre_dropna_frames else pd.DataFrame())
+                n_pre = len(pre_dropna_df)
+
+                # 4 & 5. after dropna, and how many were removed by it
+                if n_pre > 0:
+                    n_post = len(pre_dropna_df.dropna())
+                    n_dropped_by_nan = n_pre - n_post
+                else:
+                    n_post = 0
+                    n_dropped_by_nan = 0
+
+                print(f"    3. Windows generated (pre-dropna):    {n_pre}")
+                print(f"    4. Windows remaining (post-dropna):   {n_post}")
+                print(f"    5. Windows removed due to NaN values: {n_dropped_by_nan}")
+
+                # If any windows were dropped, show WHICH columns had NaNs,
+                # to make the root cause immediately visible.
+                if n_dropped_by_nan > 0:
+                    nan_rows = pre_dropna_df[pre_dropna_df.isna().any(axis=1)]
+                    nan_cols = nan_rows.isna().sum()
+                    nan_cols = nan_cols[nan_cols > 0].sort_values(ascending=False)
+                    print(f"       Columns containing NaN (top 10):")
+                    for col, cnt in nan_cols.head(10).items():
+                        print(f"         {col}: {cnt} window(s)")
+            print(f"  ── end Subject 109 diagnostic ─────────────────────────\n")
+        # ── end diagnostic ───────────────────────────────────────────────────
+
+        all_windows.append(subj_windows)
 
     windows_ = pd.concat(all_windows, ignore_index=True).dropna()
 
