@@ -18,8 +18,27 @@ Run AFTER pamap2_ml_model.py (needs pamap2_combined.csv in the same directory).
 
 IMPORTANT: thresholds, feature set, and model config are NOT tuned here.
 This script only measures whether confidence predicts correctness.
+
+── INCREMENTAL / RESUMABLE WORKFLOW ────────────────────────────────────────
+Subjects 103, 105, 106, 108 have already been validated and their per-window
+results live in pamap2_multisubject_reliability.csv. This script:
+  1. Caches the complete 308-feature dataset (pamap2_reliability_features.pkl,
+     a pickled DataFrame with all feature columns + activityID + subject_id +
+     data_source) so feature extraction from the raw CSV and the inter-window
+     stability-feature step never have to run twice.
+  2. Only trains/validates the subjects listed in VALIDATE_SUBJECTS below —
+     currently the five remaining ones. It does NOT rerun 103/105/106/108.
+  3. Saves the new subjects' per-window results to a SEPARATE file
+     (pamap2_multisubject_reliability_remaining.csv) so the original
+     4-subject file is never overwritten.
+  4. A separate combine stage (bottom of this script) merges the existing
+     4-subject file with the new 5-subject file into the final 9-subject
+     per-window dataset, verifies all 9 subjects are present, and recomputes
+     every statistic directly from that combined per-window data — never by
+     averaging the old and new summary numbers.
 """
 
+import os
 import numpy as np
 import pandas as pd
 import warnings
@@ -51,11 +70,19 @@ SAMPLING_FREQ      = 100
 PURITY_THRESHOLD   = 0.85
 SMOOTH_WINDOW       = 29     # not used for reliability windows (per-window eval), kept for parity
 
-# QUICK EXPERIMENT — 4 subjects. After this run is verified, switch to the
-# 9-subject list below for the final paper run. Do not pick subjects based
-# on how the results look.
-VALIDATE_SUBJECTS = [103, 105, 106, 108]
-# VALIDATE_SUBJECTS = [101, 102, 103, 104, 105, 106, 107, 108, 109]   # final paper run
+FEATURE_CACHE_PKL  = "pamap2_reliability_features.pkl"
+
+EXISTING_RESULTS_CSV  = "pamap2_multisubject_reliability.csv"            # 103, 105, 106, 108 — DO NOT OVERWRITE
+REMAINING_RESULTS_CSV = "pamap2_multisubject_reliability_remaining.csv"  # new 5-subject run
+FINAL_RESULTS_CSV     = "pamap2_multisubject_reliability_final.csv"      # combined 9-subject per-window data
+
+ALREADY_VALIDATED_SUBJECTS = [103, 105, 106, 108]
+ALL_NINE_SUBJECTS = [101, 102, 103, 104, 105, 106, 107, 108, 109]
+
+# Only the five remaining subjects are trained/validated in this run.
+# 103, 105, 106, 108 are NOT rerun — their results already exist in
+# pamap2_multisubject_reliability.csv and are picked up by the combine stage.
+VALIDATE_SUBJECTS = [101, 102, 104, 107, 109]
 
 ACTIVITY_MAP = {
     1:'lying', 2:'sitting', 3:'standing', 4:'walking', 5:'running',
@@ -67,20 +94,38 @@ PROTOCOL_ACTIVITY_IDS = {1, 2, 3, 4, 5, 6, 7, 12, 13, 16, 17}
 
 print("=" * 65)
 print("PAMAP2 — MULTI-SUBJECT RELIABILITY VALIDATION (FINAL MODEL)")
-print(f"Validating on subjects: {VALIDATE_SUBJECTS}")
 print("=" * 65)
 
-# ── LOAD DATA ────────────────────────────────────────────────────────────
-print("\nLoading combined dataset...")
-df = pd.read_csv(INPUT_FILE)
-print(f"  Shape: {df.shape}")
+# ── VERIFY EXISTING 4-SUBJECT RESULTS BEFORE DOING ANYTHING ELSE ──────────
+# Required by the resumable workflow: load the already-completed results,
+# confirm they contain exactly 103/105/106/108, and stop rather than
+# silently proceeding toward an incomplete final result if not.
+if os.path.exists(EXISTING_RESULTS_CSV):
+    _existing_check_df = pd.read_csv(EXISTING_RESULTS_CSV)
+    _existing_subjects = set(_existing_check_df['subject'].unique().tolist())
+    _expected_existing = set(ALREADY_VALIDATED_SUBJECTS)
+    if _existing_subjects != _expected_existing:
+        print(f"WARNING: {EXISTING_RESULTS_CSV} does not contain exactly "
+              f"{sorted(_expected_existing)}.")
+        print(f"  Found subjects: {sorted(_existing_subjects)}")
+        raise SystemExit(
+            "Stopping — existing 4-subject results are missing or unexpected. "
+            "Refusing to proceed toward an incomplete final result."
+        )
+    print("Existing validation results found:")
+    print(f"  {', '.join(str(s) for s in sorted(_existing_subjects))}")
+else:
+    print(f"WARNING: {EXISTING_RESULTS_CSV} not found.")
+    raise SystemExit(
+        f"Stopping — {EXISTING_RESULTS_CSV} (results for "
+        f"{ALREADY_VALIDATED_SUBJECTS}) must exist before running the "
+        "remaining subjects."
+    )
 
-SENSOR_COLS = [c for c in df.columns
-               if c not in ['timestamp', 'activityID', 'subject_id',
-                             'activity_name', 'acc_magnitude', 'data_source',
-                             'heartRate',
-                             'hand_temp', 'chest_temp', 'ankle_temp']]
-print(f"  Sensor columns used: {len(SENSOR_COLS)}")
+print("\nRunning remaining subjects:")
+for _s in VALIDATE_SUBJECTS:
+    print(f"  {_s}")
+print("=" * 65)
 
 
 # ── FEATURE ENGINEERING — identical to pamap2_ml_model.py ─────────────────
@@ -214,42 +259,79 @@ def extract_window_features(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-print("\nExtracting features for all subjects (same 308-feature pipeline)...")
-all_windows = []
-for sid in df['subject_id'].unique():
-    print(f"  Processing subject {sid}...")
-    subj_df = df[df['subject_id'] == sid].reset_index(drop=True)
-    all_windows.append(extract_window_features(subj_df))
+def build_feature_dataset():
+    """Runs the full 308-feature extraction over the raw CSV. Only called
+    when no cache is present."""
+    print("\nLoading combined dataset...")
+    df = pd.read_csv(INPUT_FILE)
+    print(f"  Shape: {df.shape}")
 
-windows = pd.concat(all_windows, ignore_index=True).dropna()
+    global SENSOR_COLS
+    SENSOR_COLS = [c for c in df.columns
+                   if c not in ['timestamp', 'activityID', 'subject_id',
+                                 'activity_name', 'acc_magnitude', 'data_source',
+                                 'heartRate',
+                                 'hand_temp', 'chest_temp', 'ankle_temp']]
+    print(f"  Sensor columns used: {len(SENSOR_COLS)}")
 
-# ── INTER-WINDOW STABILITY FEATURES — identical to main pipeline ──────────
-STABILITY_FEATURES = [
-    'hand_acc_mag_mean', 'hand_acc_mag_std',
-    'hand_acc16_x_mean', 'hand_acc16_y_mean', 'hand_acc16_z_mean',
-    'hand_ankle_ratio',
-    'hand_gyro_mag_mean', 'hand_gyro_mag_std',
-    'hand_acc_mag_autocorr_25',
-    'hand_gyro_dominance',
-]
+    print("\nExtracting features for all subjects (same 308-feature pipeline)...")
+    all_windows = []
+    for sid in df['subject_id'].unique():
+        print(f"  Processing subject {sid}...")
+        subj_df = df[df['subject_id'] == sid].reset_index(drop=True)
+        all_windows.append(extract_window_features(subj_df))
 
-stability_dfs = []
-for sid in windows['subject_id'].unique():
-    subj = windows[windows['subject_id'] == sid].copy()
-    for feat in STABILITY_FEATURES:
-        if feat in subj.columns:
-            subj[f'{feat}_rolling_std'] = (
-                subj[feat].rolling(window=5, center=True, min_periods=1).std().fillna(0)
-            )
-    stability_dfs.append(subj)
+    windows_ = pd.concat(all_windows, ignore_index=True).dropna()
 
-windows = pd.concat(stability_dfs, ignore_index=True)
+    # ── INTER-WINDOW STABILITY FEATURES — identical to main pipeline ──────
+    STABILITY_FEATURES = [
+        'hand_acc_mag_mean', 'hand_acc_mag_std',
+        'hand_acc16_x_mean', 'hand_acc16_y_mean', 'hand_acc16_z_mean',
+        'hand_ankle_ratio',
+        'hand_gyro_mag_mean', 'hand_gyro_mag_std',
+        'hand_acc_mag_autocorr_25',
+        'hand_gyro_dominance',
+    ]
 
-FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
+    stability_dfs = []
+    for sid in windows_['subject_id'].unique():
+        subj = windows_[windows_['subject_id'] == sid].copy()
+        for feat in STABILITY_FEATURES:
+            if feat in subj.columns:
+                subj[f'{feat}_rolling_std'] = (
+                    subj[feat].rolling(window=5, center=True, min_periods=1).std().fillna(0)
+                )
+        stability_dfs.append(subj)
+
+    windows_ = pd.concat(stability_dfs, ignore_index=True)
+    return windows_
+
+
+SENSOR_COLS = None  # populated inside build_feature_dataset() on a cache miss
+
+if os.path.exists(FEATURE_CACHE_PKL):
+    print("Loading cached 308-feature dataset...")
+    windows = pd.read_pickle(FEATURE_CACHE_PKL)
+    FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
+    print(f"  Loaded {len(windows):,} windows | {len(FEATURE_COLS)} features from cache")
+else:
+    print("Feature cache not found. Extracting features...")
+    windows = build_feature_dataset()
+
+    FEATURE_COLS = [c for c in windows.columns if c not in ['activityID', 'subject_id', 'data_source']]
+    assert len(FEATURE_COLS) == 308, (
+        f"Expected 308 features to match the final pipeline, got {len(FEATURE_COLS)}. "
+        "Check that this script's feature engineering hasn't drifted from pamap2_ml_model.py."
+    )
+
+    print(f"\nSaving feature cache ({len(windows):,} windows x {len(FEATURE_COLS)} features)...")
+    windows.to_pickle(FEATURE_CACHE_PKL)
+    print(f"  Saved: {FEATURE_CACHE_PKL}")
+
 print(f"\nTotal windows: {len(windows):,} | Features: {len(FEATURE_COLS)}")
 assert len(FEATURE_COLS) == 308, (
     f"Expected 308 features to match the final pipeline, got {len(FEATURE_COLS)}. "
-    "Check that this script's feature engineering hasn't drifted from pamap2_ml_model.py."
+    "Cache may be stale — delete pamap2_reliability_features.pkl and rerun."
 )
 
 
@@ -283,10 +365,17 @@ def build_voting_clf():
 
 
 # ── RUN SUBJECT-WISE VALIDATION WITH THE FINAL VOTING CLASSIFIER ──────────
+# Skip any subject already validated in pamap2_multisubject_reliability.csv —
+# defensive guard against accidentally rerunning 103/105/106/108.
+subjects_to_run = [s for s in VALIDATE_SUBJECTS if s not in ALREADY_VALIDATED_SUBJECTS]
+skipped_already_done = [s for s in VALIDATE_SUBJECTS if s in ALREADY_VALIDATED_SUBJECTS]
+if skipped_already_done:
+    print(f"\nSkipping subjects already validated (found in {EXISTING_RESULTS_CSV}): {skipped_already_done}")
+
 all_results = []
 per_subject_summary = []
 
-for val_sub in VALIDATE_SUBJECTS:
+for val_sub in subjects_to_run:
     print(f"\n{'='*65}")
     print(f"Validating on Subject {val_sub}")
     print(f"{'='*65}")
@@ -354,6 +443,7 @@ for val_sub in VALIDATE_SUBJECTS:
     per_subject_summary.append(subj_row)
 
     df_result = pd.DataFrame({
+        'window_id': [f"{val_sub}_{i}" for i in range(len(y_test))],
         'subject': val_sub,
         'confidence': confidence.round(4),
         'predicted_activity': [ACTIVITY_MAP.get(a, str(a)) for a in y_pred],
@@ -363,20 +453,142 @@ for val_sub in VALIDATE_SUBJECTS:
     })
     all_results.append(df_result)
 
-# ── COMBINE ──────────────────────────────────────────────────────────────
-combined = pd.concat(all_results, ignore_index=True)
-combined.to_csv("pamap2_multisubject_reliability.csv", index=False)
+# ── SAVE NEW SUBJECTS' RESULTS SEPARATELY — never touches the existing file ─
+if all_results:
+    new_results = pd.concat(all_results, ignore_index=True)
+    new_results.to_csv(REMAINING_RESULTS_CSV, index=False)
+    print(f"\nSaved new per-window results: {REMAINING_RESULTS_CSV} ({len(new_results):,} windows)")
+
+    per_subject_new_df = pd.DataFrame(per_subject_summary)
+    per_subject_new_df.to_csv("pamap2_per_subject_summary_remaining.csv", index=False)
+    print(f"Saved: pamap2_per_subject_summary_remaining.csv")
+else:
+    print("\nNo new subjects were validated this run (nothing in subjects_to_run).")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# COMBINE STAGE — merge existing 4-subject results + new 5-subject results,
+# verify all 9 subjects present, and recompute every statistic from the
+# combined per-window data. Nothing here is averaged from old summaries.
+# ════════════════════════════════════════════════════════════════════════
+
+def traffic_light_from_conf(c):
+    if c >= 0.75:
+        return "GREEN"
+    if c >= 0.45:
+        return "YELLOW"
+    return "RED"
+
 
 print(f"\n{'='*65}")
-print("PER-SUBJECT SUMMARY")
+print("COMBINE STAGE — building final 9-subject dataset")
 print(f"{'='*65}")
-per_subject_df = pd.DataFrame(per_subject_summary)
+
+pieces = []
+if os.path.exists(EXISTING_RESULTS_CSV):
+    existing_df = pd.read_csv(EXISTING_RESULTS_CSV)
+
+    # Note whether the existing 4-subject file has activity-label columns.
+    # These are only needed for macro Precision/Recall/F1 — their absence
+    # does NOT stop the run. The existing results are preserved exactly as
+    # they are; missing-label handling happens later, at the metrics stage.
+    required_label_cols = {'predicted_activity', 'actual_activity'}
+    missing_label_cols = required_label_cols - set(existing_df.columns)
+    if missing_label_cols:
+        print(f"  Note: {EXISTING_RESULTS_CSV} is missing column(s) "
+              f"{sorted(missing_label_cols)}. Macro Precision/Recall/F1 will be "
+              "omitted from the final metrics (all other statistics are unaffected). "
+              "No labels will be fabricated or reconstructed.")
+
+    # Backfill window_id for the existing file if it predates that column,
+    # so every row in the final dataset is traceable — existing predictions,
+    # confidences, and labels are left untouched.
+    if 'window_id' not in existing_df.columns:
+        existing_df = existing_df.copy()
+        existing_df['window_id'] = [
+            f"{row.subject}_{i}"
+            for i, row in enumerate(existing_df.itertuples(index=False))
+        ]
+        print(f"  Note: {EXISTING_RESULTS_CSV} had no window_id column — backfilled "
+              "one from subject + row order within the file (existing prediction "
+              "data was not modified).")
+
+    print(f"  Loaded existing results: {EXISTING_RESULTS_CSV} "
+          f"({len(existing_df):,} windows, subjects {sorted(existing_df['subject'].unique())})")
+    pieces.append(existing_df)
+else:
+    print(f"  WARNING: {EXISTING_RESULTS_CSV} not found — existing 4-subject results are missing.")
+
+if os.path.exists(REMAINING_RESULTS_CSV):
+    remaining_df = pd.read_csv(REMAINING_RESULTS_CSV)
+    print(f"  Loaded new results: {REMAINING_RESULTS_CSV} "
+          f"({len(remaining_df):,} windows, subjects {sorted(remaining_df['subject'].unique())})")
+    pieces.append(remaining_df)
+else:
+    print(f"  Note: {REMAINING_RESULTS_CSV} not found (no new run yet, or this run produced no results).")
+
+if not pieces:
+    raise SystemExit("No per-window result files found. Nothing to combine.")
+
+# Concatenate all rows directly from both files — every evaluated window is
+# used exactly once. No deduplication: two different windows can legitimately
+# share identical prediction/confidence values, and window_id already makes
+# every row traceable without needing to collapse "duplicates".
+final_combined = pd.concat(pieces, ignore_index=True)
+
+# ── SUBJECT COMPLETENESS CHECK ─────────────────────────────────────────────
+expected_subjects = set(ALL_NINE_SUBJECTS)
+present_subjects_set = set(final_combined['subject'].unique().tolist())
+present_subjects = sorted(present_subjects_set)
+
+if present_subjects_set == expected_subjects:
+    print(f"\nFINAL VALIDATION: 9 subjects confirmed")
+    print(f"{', '.join(str(s) for s in present_subjects)}")
+else:
+    missing_subjects = sorted(expected_subjects - present_subjects_set)
+    extra_subjects = sorted(present_subjects_set - expected_subjects)
+    print(f"\nSubject check FAILED.")
+    print(f"  Present:  {present_subjects}")
+    if missing_subjects:
+        print(f"  Missing:  {missing_subjects}")
+    if extra_subjects:
+        print(f"  Unexpected (not in the 9-subject list): {extra_subjects}")
+    raise SystemExit(
+        "Stopping before generating final results — set(final_results['subject']) "
+        f"!= expected_subjects ({sorted(expected_subjects)}). "
+        "Run the remaining subjects, then re-run the combine stage."
+    )
+
+final_combined.to_csv(FINAL_RESULTS_CSV, index=False)
+print(f"\nSaved combined 9-subject per-window results: {FINAL_RESULTS_CSV} "
+      f"({len(final_combined):,} windows)")
+
+combined = final_combined  # everything below recomputes from this combined dataset
+
+# ── PER-SUBJECT SUMMARY (recomputed from combined per-window data) ────────
+print(f"\n{'='*65}")
+print("PER-SUBJECT SUMMARY (final, all 9 subjects)")
+print(f"{'='*65}")
+
+per_subject_rows = []
+for sid in present_subjects:
+    subj_data = combined[combined['subject'] == sid]
+    acc = subj_data['is_correct'].mean()
+    row = {"subject": sid, "accuracy": round(acc, 4), "n_windows": len(subj_data)}
+    for tl in ['GREEN', 'YELLOW', 'RED']:
+        tsub = subj_data[subj_data['traffic_light'] == tl]
+        n = len(tsub)
+        row[f"{tl.lower()}_accuracy"] = round(tsub['is_correct'].mean(), 4) if n > 0 else None
+        row[f"{tl.lower()}_n"] = n
+    per_subject_rows.append(row)
+
+per_subject_df = pd.DataFrame(per_subject_rows)
 print(per_subject_df.to_string(index=False))
-per_subject_df.to_csv("pamap2_per_subject_summary.csv", index=False)
+per_subject_df.to_csv("pamap2_per_subject_summary_final.csv", index=False)
 
 # ── RELIABILITY-TIER ANALYSIS ───────────────────────────────────────────────
 print(f"\n{'='*65}")
-print("COMBINED RELIABILITY-TIER ANALYSIS (all validation subjects)")
+print("COMBINED RELIABILITY-TIER ANALYSIS (final, all 9 subjects)")
 print(f"{'='*65}")
 
 tier_rows = []
@@ -395,7 +607,7 @@ for tl in ['GREEN', 'YELLOW', 'RED']:
     })
 
 tier_df = pd.DataFrame(tier_rows)
-tier_df.to_csv("pamap2_reliability_tier_summary.csv", index=False)
+tier_df.to_csv("pamap2_reliability_tier_summary_final.csv", index=False)
 print(tier_df.to_string(index=False))
 
 # ── ORDERING CHECK: GREEN accuracy > YELLOW accuracy > RED accuracy? ───────
@@ -413,11 +625,10 @@ if isinstance(green_acc, float) and isinstance(yellow_acc, float) and isinstance
 
 # ── CONFIDENCE-BIN ANALYSIS ─────────────────────────────────────────────────
 print(f"\n{'='*65}")
-print("CONFIDENCE-BIN ANALYSIS (10 bins)")
+print("CONFIDENCE-BIN ANALYSIS (10 bins, final)")
 print(f"{'='*65}")
 
 bin_edges = np.linspace(0, 1, 11)
-combined['conf_bin'] = pd.cut(combined['confidence'], bins=bin_edges, include_lowest=True)
 
 bin_rows = []       # full precision — used for ECE and plotting
 bin_rows_csv = []   # rounded — used only for the saved CSV / printout
@@ -445,12 +656,12 @@ for i in range(10):
     })
 
 bin_df = pd.DataFrame(bin_rows_csv)
-bin_df.to_csv("pamap2_confidence_bins.csv", index=False)
+bin_df.to_csv("pamap2_confidence_bins_final.csv", index=False)
 print(bin_df.to_string(index=False))
 
 # ── SPEARMAN CORRELATION ────────────────────────────────────────────────────
 print(f"\n{'='*65}")
-print("SPEARMAN CORRELATION: confidence vs is_correct")
+print("SPEARMAN CORRELATION: confidence vs is_correct (final)")
 print(f"{'='*65}")
 rho, p_value = spearmanr(combined['confidence'], combined['is_correct'])
 print(f"  Spearman rho: {rho:.4f}")
@@ -463,7 +674,7 @@ print("  magnitude directly instead.")
 
 # ── EXPECTED CALIBRATION ERROR (ECE) ────────────────────────────────────────
 print(f"\n{'='*65}")
-print("EXPECTED CALIBRATION ERROR (ECE)")
+print("EXPECTED CALIBRATION ERROR (ECE, final)")
 print(f"{'='*65}")
 
 ece = 0.0
@@ -477,43 +688,80 @@ print(f"  ECE: {ece:.4f}")
 
 # ── OVERALL COMBINED METRICS ─────────────────────────────────────────────
 print(f"\n{'='*65}")
-print("OVERALL COMBINED VALIDATION METRICS")
+print("OVERALL COMBINED VALIDATION METRICS (final, all 9 subjects)")
 print(f"{'='*65}")
 
-# Precision/Recall/F1 need label-space comparison; reconstruct integer labels
-# from the activity-name strings stored in combined for consistency.
-inv_map = {v: k for k, v in ACTIVITY_MAP.items()}
-y_true_all = combined['actual_activity'].map(inv_map).values
-y_pred_all = combined['predicted_activity'].map(inv_map).values
+# Accuracy only requires is_correct, which every row has regardless of
+# whether activity-label columns are present.
+overall_acc = combined['is_correct'].mean()
 
-overall_acc = accuracy_score(y_true_all, y_pred_all)
-overall_bac = balanced_accuracy_score(y_true_all, y_pred_all)
-overall_prec = precision_score(y_true_all, y_pred_all, average='macro', zero_division=0)
-overall_rec = recall_score(y_true_all, y_pred_all, average='macro', zero_division=0)
-overall_f1 = f1_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+# Balanced Accuracy is per-class recall averaged across classes, which needs
+# true/predicted labels — computed alongside precision/recall/F1 below when
+# labels are available for all 9 subjects; otherwise omitted.
+overall_bac = None
+
+labels_available = (
+    'actual_activity' in combined.columns and
+    'predicted_activity' in combined.columns and
+    combined['actual_activity'].notna().all() and
+    combined['predicted_activity'].notna().all()
+)
+
+overall_prec = overall_rec = overall_f1 = None
+
+if labels_available:
+    inv_map = {v: k for k, v in ACTIVITY_MAP.items()}
+    y_true_all = combined['actual_activity'].map(inv_map).values
+    y_pred_all = combined['predicted_activity'].map(inv_map).values
+
+    if pd.isna(y_true_all).any() or pd.isna(y_pred_all).any():
+        print("  Note: some activity-label values did not map to a known activityID — "
+              "macro Precision/Recall/F1 and label-based Balanced Accuracy omitted.")
+        labels_available = False
+    else:
+        overall_bac = balanced_accuracy_score(y_true_all, y_pred_all)
+        overall_prec = precision_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+        overall_rec = recall_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+        overall_f1 = f1_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+
+if not labels_available:
+    print("  Note: predicted_activity/actual_activity not available for all 9 subjects — "
+        "macro Precision/Recall/F1 omitted. Balanced Accuracy also requires these "
+        "labels and is omitted for the same reason; Accuracy, tier accuracy, "
+        "confidence bins, ECE, and Spearman rho are unaffected.")
 
 print(f"  Accuracy:            {overall_acc:.4f}")
-print(f"  Balanced Accuracy:   {overall_bac:.4f}")
-print(f"  Precision (macro):   {overall_prec:.4f}")
-print(f"  Recall (macro):      {overall_rec:.4f}")
-print(f"  F1 (macro):          {overall_f1:.4f}")
+if overall_bac is not None:
+    print(f"  Balanced Accuracy:   {overall_bac:.4f}")
+else:
+    print(f"  Balanced Accuracy:   omitted (activity labels not available for all 9 subjects)")
+if overall_prec is not None:
+    print(f"  Precision (macro):   {overall_prec:.4f}")
+    print(f"  Recall (macro):      {overall_rec:.4f}")
+    print(f"  F1 (macro):          {overall_f1:.4f}")
+else:
+    print(f"  Precision (macro):   omitted (activity labels not available for all 9 subjects)")
+    print(f"  Recall (macro):      omitted (activity labels not available for all 9 subjects)")
+    print(f"  F1 (macro):          omitted (activity labels not available for all 9 subjects)")
 print(f"  Mean confidence:     {combined['confidence'].mean():.4f}")
 print(f"  ECE:                 {ece:.4f}")
 print(f"  Spearman rho:        {rho:.4f}  (p={p_value:.4g}, not a valid significance test — overlapping windows)")
 
-pd.DataFrame([{
+final_metrics_row = {
     "accuracy": round(overall_acc, 4),
-    "balanced_accuracy": round(overall_bac, 4),
-    "precision_macro": round(overall_prec, 4),
-    "recall_macro": round(overall_rec, 4),
-    "f1_macro": round(overall_f1, 4),
+    "balanced_accuracy": round(overall_bac, 4) if overall_bac is not None else None,
+    "precision_macro": round(overall_prec, 4) if overall_prec is not None else None,
+    "recall_macro": round(overall_rec, 4) if overall_rec is not None else None,
+    "f1_macro": round(overall_f1, 4) if overall_f1 is not None else None,
     "mean_confidence": round(combined['confidence'].mean(), 4),
     "ece": round(ece, 4),
     "spearman_rho": round(rho, 4),
     "spearman_p": p_value,
     "n_windows": n_total,
-    "validate_subjects": str(VALIDATE_SUBJECTS),
-}]).to_csv("pamap2_overall_reliability_metrics.csv", index=False)
+    "validate_subjects": str(present_subjects),
+    "labels_available_all_9_subjects": labels_available,
+}
+pd.DataFrame([final_metrics_row]).to_csv("pamap2_overall_reliability_metrics_final.csv", index=False)
 
 # ── GRAPH 1: RELIABILITY / CALIBRATION CURVE ────────────────────────────────
 plot_bins = [r for r in bin_rows if r["n_samples"] > 0]
@@ -525,15 +773,15 @@ plt.plot([0, 1], [0, 1], linestyle='--', color='gray', label='Ideal (accuracy = 
 plt.plot(bin_centers, bin_accs, marker='o', color='steelblue', label='Observed accuracy')
 plt.xlabel("Confidence bin (center)")
 plt.ylabel("Observed accuracy")
-plt.title("Reliability / Calibration Curve — Final VotingClassifier")
+plt.title("Reliability / Calibration Curve — Final VotingClassifier (9 subjects)")
 plt.xlim(0, 1)
 plt.ylim(0, 1)
 plt.legend()
 plt.grid(alpha=0.3)
 plt.tight_layout()
-plt.savefig("graph_18_reliability_calibration.png", dpi=150)
+plt.savefig("graph_18_reliability_calibration_final.png", dpi=150)
 plt.close()
-print("\nSaved: graph_18_reliability_calibration.png")
+print("\nSaved: graph_18_reliability_calibration_final.png")
 
 # ── GRAPH 2: TRAFFIC-LIGHT ACCURACY BAR CHART ───────────────────────────────
 tier_labels = tier_df['tier'].tolist()
@@ -547,15 +795,16 @@ for bar, acc in zip(bars, tier_accs):
               ha='center', va='bottom')
 plt.ylabel("Accuracy")
 plt.ylim(0, 1.05)
-plt.title("Traffic-Light Tier vs Actual Accuracy")
+plt.title("Traffic-Light Tier vs Actual Accuracy (9 subjects)")
 plt.tight_layout()
-plt.savefig("graph_19_traffic_light_accuracy.png", dpi=150)
+plt.savefig("graph_19_traffic_light_accuracy_final.png", dpi=150)
 plt.close()
-print("Saved: graph_19_traffic_light_accuracy.png")
+print("Saved: graph_19_traffic_light_accuracy_final.png")
 
-print(f"\nSaved: pamap2_multisubject_reliability.csv")
-print(f"Saved: pamap2_per_subject_summary.csv")
-print(f"Saved: pamap2_reliability_tier_summary.csv")
-print(f"Saved: pamap2_confidence_bins.csv")
-print(f"Saved: pamap2_overall_reliability_metrics.csv")
-print(f"\n({n_total:,} windows across subjects {VALIDATE_SUBJECTS} — final-model reliability validation)")
+print(f"\nSaved: {FINAL_RESULTS_CSV}")
+print(f"Saved: pamap2_per_subject_summary_final.csv")
+print(f"Saved: pamap2_reliability_tier_summary_final.csv")
+print(f"Saved: pamap2_confidence_bins_final.csv")
+print(f"Saved: pamap2_overall_reliability_metrics_final.csv")
+print(f"\n({n_total:,} windows across subjects {present_subjects} — FINAL 9-subject reliability validation)")
+print(f"\nExisting 4-subject file ({EXISTING_RESULTS_CSV}) was NOT modified.")
